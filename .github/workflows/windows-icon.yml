@@ -5,6 +5,9 @@ name: Windows icon check
 # shortcut on a light and a dark desktop, Explorer, and the taskbar.
 on:
   workflow_dispatch:
+  # A manual run needs the file on the default branch; this branch runs it on push.
+  push:
+    branches: [windows-icon]
 
 jobs:
   icon:

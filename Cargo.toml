@@ -1,6 +1,6 @@
 [package]
 name = "kern"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "KERN — native IDE written in Rust"
 license = "MIT"
@@ -60,7 +60,7 @@ objc2-core-media = "0.3.2"
 objc2-foundation = "0.3.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [build-dependencies]
 embed-resource = "3"

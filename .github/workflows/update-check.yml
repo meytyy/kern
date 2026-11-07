@@ -1,0 +1,43 @@
+name: Update check
+
+# After a release: installs the previous KERN from its GitHub Release on a fresh
+# Windows machine, starts it, and records the update notice it shows for the
+# newest release (the check runs a few seconds after start).
+on:
+  workflow_dispatch:
+    inputs:
+      previous:
+        description: Tag of the installed version that should see the update
+        required: true
+        default: v0.1.1
+
+jobs:
+  notice:
+    runs-on: windows-latest
+    steps:
+      - name: Install the previous release and start it
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          New-Item -ItemType Directory -Force -Path shots | Out-Null
+          $tag = '${{ inputs.previous }}'
+          Invoke-WebRequest "https://github.com/meytyy/kern/releases/download/$tag/KERN-windows-x64-setup.exe" -OutFile setup.exe
+          Start-Process setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $exe = Join-Path $env:ProgramFiles 'KERN\KERN.exe'
+          (Get-Item $exe).VersionInfo.ProductVersion | Tee-Object shots\installed-version.txt
+          Get-Process | Where-Object { $_.MainWindowTitle -eq 'System Properties' } | Stop-Process -Force -ErrorAction SilentlyContinue
+          $p = Start-Process $exe -PassThru
+          Start-Sleep 25
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("shots\update-notice.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          if ($p.HasExited) { throw "KERN exited" }
+          Stop-Process -Id $p.Id -Force
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: update-notice
+          path: shots/

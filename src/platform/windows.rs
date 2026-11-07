@@ -126,3 +126,35 @@ pub fn reveal(path: &std::path::Path) -> std::io::Result<()> {
         .spawn()
         .map(|_| ())
 }
+
+/// Moves `path` to the Recycle Bin. With FOF_ALLOWUNDO the shell recycles; if a
+/// disk has no Recycle Bin, FOF_WANTNUKEWARNING makes Windows ask before deleting
+/// for good instead of doing it silently.
+pub fn trash(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+        FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW,
+    };
+    let full = std::path::absolute(path)?;
+    // A list of paths, each NUL-terminated, ending with an extra NUL.
+    let mut from: Vec<u16> = full.as_os_str().encode_wide().collect();
+    from.extend([0, 0]);
+    let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.as_ptr();
+    op.fFlags =
+        (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING)
+            as u16;
+    let code = unsafe { SHFileOperationW(&mut op) };
+    if code != 0 {
+        return Err(std::io::Error::other(format!("Windows error {code:#x}")));
+    }
+    if op.fAnyOperationsAborted != 0 {
+        return Err(std::io::Error::other("cancelled"));
+    }
+    if path.exists() {
+        return Err(std::io::Error::other("the item is still there"));
+    }
+    Ok(())
+}

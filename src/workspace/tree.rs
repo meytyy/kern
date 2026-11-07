@@ -209,21 +209,94 @@ pub fn create_dir(root: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
     }
 }
 
-/// Rename without overwriting a different existing file.
-pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf> {
+/// The canonical project root, and `path` checked to be inside it and not the root.
+fn inside(root: &Path, path: &Path, what: &str) -> Result<PathBuf> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| anyhow!("cannot read the project folder: {e}"))?;
+    let real = path
+        .canonicalize()
+        .map_err(|e| anyhow!("cannot read {}: {e}", path.display()))?;
+    if real == root {
+        return Err(anyhow!("The project folder itself cannot be {what}"));
+    }
+    if !real.starts_with(&root) {
+        return Err(anyhow!("Only items inside the project can be {what}"));
+    }
+    Ok(root)
+}
+
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// Renames `path` in its own folder. Another item with that name is never
+/// overwritten; changing only the letter case of the same item is allowed.
+pub fn rename(root: &Path, path: &Path, new_name: &str) -> Result<PathBuf> {
+    inside(root, path, "renamed")?;
+    let new_name = new_name.trim();
     validate_name(new_name)?;
+    if split_name(new_name).count() > 1 {
+        return Err(anyhow!(
+            "A new name cannot contain folders; use Move to… instead"
+        ));
+    }
     let parent = path.parent().ok_or_else(|| anyhow!("no parent"))?;
-    let target = parent.join(new_name.trim());
-    let same_file_case_change =
-        target.to_string_lossy().to_lowercase() == path.to_string_lossy().to_lowercase();
-    if target.exists() && !same_file_case_change {
-        return Err(anyhow!("{} already exists", target.display()));
+    let target = parent.join(new_name);
+    if target == path {
+        return Ok(target);
     }
-    if let Some(p) = target.parent() {
-        std::fs::create_dir_all(p)?;
+    let case_change = name_of(path).to_lowercase() == new_name.to_lowercase();
+    if target.exists() && !case_change {
+        return Err(exists_error(&target));
     }
-    std::fs::rename(path, &target)?;
+    std::fs::rename(path, &target).map_err(|e| anyhow!("cannot rename: {e}"))?;
     Ok(target)
+}
+
+/// Moves `path` into the folder `dest`, both inside the project. Refuses to
+/// replace an item of the same name, to move a folder into itself or one of its
+/// subfolders, and to move the project folder.
+pub fn move_into(root: &Path, path: &Path, dest: &Path) -> Result<PathBuf> {
+    let real_root = inside(root, path, "moved")?;
+    let real_dest = dest
+        .canonicalize()
+        .map_err(|e| anyhow!("cannot read {}: {e}", dest.display()))?;
+    if !real_dest.is_dir() {
+        return Err(anyhow!("{} is not a folder", dest.display()));
+    }
+    if !real_dest.starts_with(&real_root) {
+        return Err(anyhow!("The destination must be inside the project folder"));
+    }
+    let real_src = path.canonicalize()?;
+    if real_src.is_dir() && real_dest.starts_with(&real_src) {
+        return Err(anyhow!(
+            "“{}” cannot be moved into itself or one of its folders",
+            name_of(path)
+        ));
+    }
+    if real_src.parent() == Some(real_dest.as_path()) {
+        return Err(anyhow!("“{}” is already in that folder", name_of(path)));
+    }
+    let target = dest.join(path.file_name().ok_or_else(|| anyhow!("no name"))?);
+    if target.exists() {
+        return Err(anyhow!(
+            "“{}” already exists in {}; both are kept",
+            name_of(path),
+            name_of(dest)
+        ));
+    }
+    std::fs::rename(path, &target).map_err(|e| anyhow!("cannot move: {e}"))?;
+    Ok(target)
+}
+
+/// Moves `path` to the system Trash (macOS) or Recycle Bin (Windows). Never
+/// deletes for good: when there is no trash for that disk this is an error.
+pub fn trash(root: &Path, path: &Path) -> Result<()> {
+    inside(root, path, "deleted")?;
+    crate::platform::trash(path).map_err(|e| anyhow!("cannot move to the trash: {e}"))
 }
 
 #[cfg(test)]
@@ -238,7 +311,7 @@ mod tests {
         assert!(create_file(d.path(), d.path(), "новый файл.ts").is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "keep");
         assert!(create_file(d.path(), d.path(), "../evil").is_err());
-        assert!(rename(&p, "a/../../b").is_err());
+        assert!(rename(d.path(), &p, "a/../../b").is_err());
     }
 
     #[test]
@@ -247,9 +320,9 @@ mod tests {
         let a = create_file(d.path(), d.path(), "a").unwrap();
         let b = create_file(d.path(), d.path(), "b").unwrap();
         std::fs::write(&b, "b").unwrap();
-        assert!(rename(&a, "b").is_err());
+        assert!(rename(d.path(), &a, "b").is_err());
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "b");
-        let c = rename(&a, "c").unwrap();
+        let c = rename(d.path(), &a, "c").unwrap();
         assert!(c.exists() && !a.exists());
     }
 
@@ -348,5 +421,46 @@ mod tests {
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
         // A folder outside the root is refused as well.
         assert!(create_file(d.path(), outside.path(), "y.txt").is_err());
+    }
+
+    #[test]
+    fn rename_and_move_stay_in_the_project() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        let src = create_dir(root, root, "src").unwrap();
+        let lib = create_dir(root, &src, "lib").unwrap();
+        let file = create_file(root, &lib, "a.cs").unwrap();
+        std::fs::write(&file, "keep").unwrap();
+        // The root cannot be renamed, moved or deleted.
+        assert!(rename(root, root, "x").is_err());
+        assert!(move_into(root, root, &src).is_err());
+        assert!(trash(root, root).is_err());
+        // A folder never goes into itself or its own subfolder.
+        assert!(move_into(root, &src, &src).is_err());
+        assert!(move_into(root, &src, &lib).is_err());
+        // Nor outside the project.
+        let outside = tempfile::tempdir().unwrap();
+        assert!(move_into(root, &file, outside.path()).is_err());
+        // A rename keeps to its folder.
+        assert!(rename(root, &file, "../b.cs").is_err());
+        assert!(rename(root, &file, "x/b.cs").is_err());
+        // Case-only rename of the same file is fine.
+        let upper = rename(root, &file, "A.cs").unwrap();
+        assert_eq!(std::fs::read_to_string(&upper).unwrap(), "keep");
+        // Move a folder with its contents to the root.
+        let moved = move_into(root, &lib, root).unwrap();
+        assert_eq!(moved, root.join("lib"));
+        assert_eq!(std::fs::read_to_string(moved.join("A.cs")).unwrap(), "keep");
+        // A name taken at the destination: both are kept, nothing moves.
+        let other = create_dir(root, &src, "lib").unwrap();
+        assert!(
+            move_into(root, &other, root)
+                .unwrap_err()
+                .to_string()
+                .contains("both are kept")
+        );
+        assert!(other.is_dir() && root.join("lib/A.cs").is_file());
+        // Moving to where it already is.
+        assert!(move_into(root, &other, &src).is_err());
     }
 }

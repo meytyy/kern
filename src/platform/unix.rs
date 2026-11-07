@@ -124,6 +124,48 @@ pub fn reveal(path: &std::path::Path) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+/// Moves `path` to the Trash with `NSFileManager`, as Finder does. A disk
+/// without a Trash is an error: nothing is deleted for good.
+#[cfg(target_os = "macos")]
+pub fn trash(path: &std::path::Path) -> std::io::Result<()> {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2_foundation::NSString;
+    let full = std::path::absolute(path)?;
+    unsafe {
+        let class = |name: &std::ffi::CStr| {
+            AnyClass::get(name).ok_or_else(|| std::io::Error::other("Foundation is missing"))
+        };
+        let text = NSString::from_str(&full.to_string_lossy());
+        let url: Option<Retained<AnyObject>> = msg_send![class(c"NSURL")?, fileURLWithPath: &*text];
+        let url = url.ok_or_else(|| std::io::Error::other("bad path"))?;
+        let manager: Retained<AnyObject> = msg_send![class(c"NSFileManager")?, defaultManager];
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let ok: Bool = msg_send![
+            &*manager,
+            trashItemAtURL: &*url,
+            resultingItemURL: std::ptr::null_mut::<*mut AnyObject>(),
+            error: &mut error
+        ];
+        if ok.as_bool() {
+            return Ok(());
+        }
+        let reason = if error.is_null() {
+            "the Trash is not available here".to_string()
+        } else {
+            let text: Retained<NSString> = msg_send![error, localizedDescription];
+            text.to_string()
+        };
+        Err(std::io::Error::other(reason))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn trash(_path: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("no system trash on this platform"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,12 +1,12 @@
 # KERN
 
-Нативная IDE на Rust: редактор кода, поиск, терминал, запуск проектов, Git, GitHub, чат с Codex в правой панели, официальный Claude Code во вкладке терминала. Без Electron, WebView и HTML-интерфейса. Платформы: macOS на Apple Silicon (arm64) и Windows 11 x64. Версия 0.1.1.
+Нативная IDE на Rust: редактор кода, поиск, терминал, запуск проектов, Git, GitHub, чат с Codex в правой панели, официальный Claude Code во вкладке терминала. Без Electron, WebView и HTML-интерфейса. Платформы: macOS на Apple Silicon (arm64) и Windows 11 x64. Версия 0.1.2.
 
 ## Download
 
-**[Download for Windows (x64)](https://github.com/meytyy/kern/releases/download/v0.1.1/KERN-windows-x64-setup.exe)** · **[Download for macOS (Apple Silicon)](https://github.com/meytyy/kern/releases/download/v0.1.1/KERN-macos-arm64.zip)**
+**[Download for Windows (x64)](https://github.com/meytyy/kern/releases/download/v0.1.2/KERN-windows-x64-setup.exe)** · **[Download for macOS (Apple Silicon)](https://github.com/meytyy/kern/releases/download/v0.1.2/KERN-macos-arm64.zip)**
 
-Version 0.1.1. Both builds are unsigned: Windows SmartScreen and macOS Gatekeeper ask before the first start. On macOS, open KERN.app from the context menu (Open) or allow it in System Settings → Privacy & Security.
+Version 0.1.2. Both builds are unsigned: Windows SmartScreen and macOS Gatekeeper ask before the first start. On macOS, open KERN.app from the context menu (Open) or allow it in System Settings → Privacy & Security.
 
 Редактор, поиск, терминал и локальный Git работают без аккаунта и независимо от агентов.
 
@@ -41,7 +41,15 @@ The **Terminal** menu (in the macOS menu bar, and in the title bar on Windows) h
 
 ## Explorer
 
-New File and New Folder are in the Explorer header, in the right-click menu, in the File menu and in the palette; all of them use the same prompt and the same creation code. The header, the File menu and the palette create inside the selected folder, in the selected file's folder, or in the project root. The right-click menu goes by where you click: a folder row creates inside that folder, a file row in its folder, and the empty space below the last row in the project root, whatever is selected. Ctrl+Click opens the same menu on a Mac. Below New File… and New Folder… the menu has Reveal in Finder (Show in File Explorer on Windows), Open in Integrated Terminal (a shell in that folder), Copy Path, Copy Relative Path and, on rows, Rename…. It opens at the pointer, stays inside the window, and closes with Esc or a click outside. Enter confirms and Esc cancels. Names may contain spaces and Cyrillic, start with a dot (`.gitignore`) or name nested folders (`src/new.ts`). Windows rules apply on both platforms: no `< > : " | ? * \`, no trailing dot or space, no `CON`, `NUL`, `COM1`…; a name that exists is reported in the prompt and never overwritten; nothing can be created outside the project, including through a symbolic link. A new file opens in a focused tab; a new folder is shown and selected in the tree. Git status refreshes afterwards.
+New File, New Folder and Rename work in the tree itself, as in VS Code: a row with an icon and a name field appears where the item will be, the folder opens and scrolls into view, and the cursor is in the field. Enter creates or renames, Esc cancels. A refused name (taken, not allowed on Windows, outside the project) is shown on the row under the field, and the typed name stays so it can be fixed. A new file opens in the editor; a new folder is selected. Rename selects the name without its extension.
+
+The Explorer header buttons, the File menu, the palette and the right-click menu all use the same code. The right-click menu goes by where you click: a folder row creates inside that folder, a file row in its folder, and the empty space below the last row in the project root, whatever is selected. Ctrl+Click opens the same menu on a Mac. The menu has New File…, New Folder…, Reveal in Finder (Show in File Explorer on Windows), Open in Integrated Terminal, Copy Path, Copy Relative Path, and on items Rename…, Move to… and Move to Trash (Move to Recycle Bin on Windows).
+
+**Move.** Move to… lists the project's folders; type part of a path and press Enter. Items can also be dragged onto a folder row, which is outlined while it is a valid target. A name that exists at the destination is reported and both items are kept. A folder cannot go into itself or its subfolders, nothing leaves the project, and the project folder is never moved, renamed or deleted.
+
+**Move to Trash** uses the system Trash or Recycle Bin. A folder is confirmed by its name. If an open file has unsaved changes, KERN offers to save them first or to cancel. When a disk has no Trash, macOS reports an error and nothing is deleted; Windows asks before deleting for good.
+
+After a rename or move, open tabs follow their files, including files inside a moved folder, and unsaved text stays in the editor. The tree and the Git status refresh after every operation. Names may contain spaces and Cyrillic, start with a dot (`.gitignore`) or name nested folders for new items (`src/new.ts`). Windows rules apply on both platforms: no `< > : " | ? * \`, no trailing dot or space, no `CON`, `NUL`, `COM1`….
 
 ## File icons
 

@@ -19,6 +19,19 @@ pub struct TreeState {
     pub scroll: UniformListScrollHandle,
     /// A just-created item to scroll into view once its folder has been listed.
     pub reveal: Option<PathBuf>,
+    /// The name field of New File, New Folder or Rename, shown in the tree.
+    pub edit: Option<super::tree_ops::InlineEdit>,
+    /// Scroll to the name field once its row exists.
+    pub reveal_edit: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowKind {
+    Item,
+    /// The name field: a new item's row, or the row being renamed.
+    Field,
+    /// The message under the field when a name is refused.
+    Error,
 }
 
 #[derive(Clone)]
@@ -26,6 +39,7 @@ struct Row {
     entry: Entry,
     depth: usize,
     expanded: bool,
+    kind: RowKind,
 }
 
 impl KernApp {
@@ -60,10 +74,43 @@ impl KernApp {
         .detach();
     }
 
-    /// The project root first, then whatever is expanded under it.
+    /// The project root first, then whatever is expanded under it, with the
+    /// name field (and its error) where the new or renamed item will be.
     fn visible_rows(&self) -> Vec<Row> {
+        use super::tree_ops::EditKind;
         let Some(p) = &self.project else {
             return vec![];
+        };
+        let (new_in, renaming, has_error) = match &p.tree.edit {
+            Some(e) => match &e.kind {
+                EditKind::New { dir, folder } => {
+                    (Some((dir.clone(), *folder)), None, e.error.is_some())
+                }
+                EditKind::Rename(path) => (None, Some(path.clone()), e.error.is_some()),
+            },
+            None => (None, None, false),
+        };
+        let extra = |out: &mut Vec<Row>, depth: usize, entry: Entry| {
+            out.push(Row {
+                entry: entry.clone(),
+                depth,
+                expanded: false,
+                kind: RowKind::Field,
+            });
+            if has_error {
+                out.push(Row {
+                    entry,
+                    depth,
+                    expanded: false,
+                    kind: RowKind::Error,
+                });
+            }
+        };
+        let new_row = |dir: &Path, folder: bool| Entry {
+            path: dir.join(""),
+            name: String::new(),
+            is_dir: folder,
+            ignored: false,
         };
         let root_open = p.tree.expanded.contains(&p.root);
         let mut out = vec![Row {
@@ -75,31 +122,76 @@ impl KernApp {
             },
             depth: 0,
             expanded: root_open,
+            kind: RowKind::Item,
         }];
-        fn walk(dir: &Path, depth: usize, st: &TreeState, out: &mut Vec<Row>) {
+        #[allow(clippy::too_many_arguments)]
+        fn walk(
+            dir: &Path,
+            depth: usize,
+            st: &TreeState,
+            out: &mut Vec<Row>,
+            new_in: &Option<(PathBuf, bool)>,
+            renaming: &Option<PathBuf>,
+            extra: &dyn Fn(&mut Vec<Row>, usize, Entry),
+            new_row: &dyn Fn(&Path, bool) -> Entry,
+        ) {
+            if let Some((d, folder)) = new_in
+                && d == dir
+            {
+                extra(out, depth, new_row(dir, *folder));
+            }
             let Some(list) = st.children.get(dir) else {
                 return;
             };
             for e in list {
                 let expanded = e.is_dir && st.expanded.contains(&e.path);
-                out.push(Row {
-                    entry: e.clone(),
-                    depth,
-                    expanded,
-                });
+                if renaming.as_ref() == Some(&e.path) {
+                    extra(out, depth, e.clone());
+                } else {
+                    out.push(Row {
+                        entry: e.clone(),
+                        depth,
+                        expanded,
+                        kind: RowKind::Item,
+                    });
+                }
                 if expanded {
-                    walk(&e.path, depth + 1, st, out);
+                    walk(
+                        &e.path,
+                        depth + 1,
+                        st,
+                        out,
+                        new_in,
+                        renaming,
+                        extra,
+                        new_row,
+                    );
                 }
             }
         }
         if root_open {
-            walk(&p.root, 1, &p.tree, &mut out);
+            walk(
+                &p.root, 1, &p.tree, &mut out, &new_in, &renaming, &extra, &new_row,
+            );
         }
         out
     }
 
     /// Scroll to `tree.reveal` when its row exists.
-    fn reveal_pending(&mut self) {
+    pub fn reveal_pending(&mut self) {
+        if self.project.as_ref().is_some_and(|p| p.tree.reveal_edit) {
+            let rows = self.visible_rows();
+            if let Some(ix) = rows.iter().position(|r| r.kind == RowKind::Field)
+                && let Some(p) = &mut self.project
+            {
+                // One more row for the error line under the field.
+                p.tree
+                    .scroll
+                    .scroll_to_item(ix + 1, ScrollStrategy::Nearest);
+                p.tree.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                p.tree.reveal_edit = false;
+            }
+        }
         let Some(target) = self.project.as_ref().and_then(|p| p.tree.reveal.clone()) else {
             return;
         };
@@ -261,22 +353,6 @@ impl KernApp {
         })
     }
 
-    /// "In project/sub/folder" for the prompts.
-    fn location_label(&self, dir: &Path) -> String {
-        let Some(p) = &self.project else {
-            return dir.display().to_string();
-        };
-        match dir.strip_prefix(&p.root) {
-            Ok(rest) if rest.as_os_str().is_empty() => format!("In {}", p.name),
-            Ok(rest) => format!(
-                "In {}/{}",
-                p.name,
-                rest.to_string_lossy().replace('\\', "/")
-            ),
-            Err(_) => format!("In {}", dir.display()),
-        }
-    }
-
     /// File → New File, the Explorer header and the palette: in the selected
     /// folder, the selected file's folder, or the project root.
     pub fn prompt_new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -293,8 +369,8 @@ impl KernApp {
         }
     }
 
-    /// The one prompt for new items, whichever command asked for it. The name
-    /// field takes the focus at once; Enter creates, Esc cancels.
+    /// The one way new items are named, whichever command asked: a field in the
+    /// tree. Enter creates, Esc cancels.
     pub fn prompt_new_in(
         &mut self,
         dir: PathBuf,
@@ -302,24 +378,7 @@ impl KernApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.project.is_none() {
-            return;
-        }
-        self.overlay_return = None;
-        let (title, kind) = if folder {
-            ("New Folder", overlays::PromptKind::NewFolder(dir.clone()))
-        } else {
-            ("New File", overlays::PromptKind::NewFile(dir.clone()))
-        };
-        self.overlay = Some(overlays::Overlay::prompt(
-            title,
-            self.location_label(&dir),
-            "",
-            kind,
-            window,
-            cx,
-        ));
-        cx.notify();
+        self.start_new_item(dir, folder, window, cx);
     }
 
     pub fn prompt_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -327,23 +386,7 @@ impl KernApp {
             self.toast("Select a file or folder first", false, cx);
             return;
         };
-        if self.project.as_ref().is_some_and(|p| p.root == sel) {
-            self.toast("The project folder cannot be renamed from here", false, cx);
-            return;
-        }
-        let name = sel
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        self.overlay = Some(overlays::Overlay::prompt(
-            "Rename",
-            sel.display().to_string(),
-            &name,
-            overlays::PromptKind::Rename(sel),
-            window,
-            cx,
-        ));
-        cx.notify();
+        self.start_rename(sel, window, cx);
     }
 
     /// Open tabs follow a rename of their file or a parent folder.
@@ -405,6 +448,12 @@ impl KernApp {
             .unwrap_or_default();
         let (git_files, git_dirs) = self.git_marks();
         let tree_focused = self.tree_focus.is_focused(window);
+        let (edit_input, edit_error) = self
+            .project
+            .as_ref()
+            .and_then(|p| p.tree.edit.as_ref())
+            .map(|e| (Some(e.input.clone()), e.error.clone()))
+            .unwrap_or((None, None));
         let scroll = self
             .project
             .as_ref()
@@ -418,11 +467,90 @@ impl KernApp {
                 let mut out = Vec::with_capacity(range.len());
                 for ix in range {
                     let row = rows[ix].clone();
+                    let indent = px(8. + row.depth as f32 * 12.);
+                    match row.kind {
+                        RowKind::Field => {
+                            let Some(input) = edit_input.clone() else {
+                                continue;
+                            };
+                            let found = if row.entry.is_dir {
+                                file_icons::for_folder(&row.entry.name, false)
+                            } else {
+                                file_icons::for_file(&row.entry.name)
+                            };
+                            out.push(
+                                div()
+                                    .id(("edit-row", ix))
+                                    .key_context("KernTreeEdit")
+                                    .on_action(cx.listener(|t, _: &CancelTreeEdit, w, cx| {
+                                        t.cancel_tree_edit(w, cx)
+                                    }))
+                                    .h(px(ROW_H))
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .pl(indent)
+                                    .pr_1()
+                                    .child(registry_icon(found, false, palette))
+                                    .child(
+                                        div().flex_1().min_w_0().child(
+                                            {
+                                                use gpui_kit::component::Sizable as _;
+                                                gpui_kit::component::input::Input::new(&input)
+                                                    .small()
+                                            }
+                                            .when(edit_error.is_some(), |i| {
+                                                i.border_color(palette.danger)
+                                            }),
+                                        ),
+                                    )
+                                    .into_any_element(),
+                            );
+                            continue;
+                        }
+                        RowKind::Error => {
+                            let message = edit_error.clone().unwrap_or_default();
+                            out.push(
+                                div()
+                                    .id(("edit-error", ix))
+                                    .h(px(ROW_H))
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .pl(indent + px(20.))
+                                    .pr_2()
+                                    .child(
+                                        div()
+                                            .id(("edit-error-text", ix))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .text_size(px(11.))
+                                            .text_color(palette.danger)
+                                            .child(message.clone())
+                                            .tooltip(move |w, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(
+                                                    message.clone(),
+                                                )
+                                                .build(w, cx)
+                                            }),
+                                    )
+                                    .into_any_element(),
+                            );
+                            continue;
+                        }
+                        RowKind::Item => {}
+                    }
                     let is_active = active_path.as_ref() == Some(&row.entry.path);
                     let is_selected = selected.as_ref() == Some(&row.entry.path);
                     let entry = row.entry.clone();
                     let is_root = row.depth == 0;
-                    let drag_path = (!row.entry.is_dir).then(|| row.entry.path.clone());
+                    // Every item but the project folder can be dragged; folders take drops.
+                    let drag_path = (!is_root).then(|| row.entry.path.clone());
+                    let drop_dir = row.entry.is_dir.then(|| row.entry.path.clone());
                     let found = if row.entry.is_dir {
                         file_icons::for_folder(&row.entry.name, row.expanded)
                     } else {
@@ -442,7 +570,7 @@ impl KernApp {
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .pl(px(8. + row.depth as f32 * 12.))
+                            .pl(indent)
                             .pr_2()
                             .when(is_active, |d| d.bg(palette.accent_soft))
                             .when(is_selected && !is_active, |d| d.bg(palette.hover))
@@ -458,6 +586,18 @@ impl KernApp {
                                 d.on_drag(agent_chat::DraggedFile(path), |file, _, _, cx| {
                                     cx.new(|_| agent_chat::DragPreview(file.name()))
                                 })
+                            })
+                            .when_some(drop_dir, |d, dir| {
+                                d.drag_over::<agent_chat::DraggedFile>(move |s, _, _, _| {
+                                    s.bg(palette.accent_soft)
+                                        .border_1()
+                                        .border_color(palette.accent)
+                                })
+                                .on_drop(cx.listener(
+                                    move |this, file: &agent_chat::DraggedFile, _, cx| {
+                                        this.drop_on_folder(&file.0, &dir, cx)
+                                    },
+                                ))
                             })
                             .child(registry_icon(found, row.entry.ignored, palette))
                             .child(
@@ -678,15 +818,24 @@ fn explorer_menu(
             }))),
         );
     if item_actions {
+        let (p5, p6) = (path.to_path_buf(), path.to_path_buf());
         menu = menu
             .separator()
             .item(
                 PopupMenuItem::new("Rename…").on_click(on(Box::new(move |t, w, cx| {
-                    if let Some(p) = &mut t.project {
-                        p.tree.selected = Some(p4.clone());
-                    }
-                    t.prompt_rename(w, cx)
+                    t.start_rename(p4.clone(), w, cx)
                 }))),
+            )
+            .item(
+                PopupMenuItem::new("Move to…").on_click(on(Box::new(move |t, w, cx| {
+                    t.open_move_to(p5.clone(), w, cx)
+                }))),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new(super::tree_ops::trash_label()).on_click(on(Box::new(
+                    move |t, _, cx| t.request_trash(p6.clone(), cx),
+                ))),
             );
     }
     menu

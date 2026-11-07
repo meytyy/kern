@@ -26,6 +26,11 @@ pub enum ConfirmAction {
         agent: agents_panel::AgentTab,
         path: std::path::PathBuf,
     },
+    /// Explorer → Move to Trash, after saving open edits when `save_first`.
+    Trash {
+        path: std::path::PathBuf,
+        save_first: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -47,9 +52,6 @@ impl ConfirmChoice {
 
 #[derive(Clone)]
 pub enum PromptKind {
-    NewFile(PathBuf),
-    NewFolder(PathBuf),
-    Rename(PathBuf),
     CloneUrl,
     NewBranch,
     RenameSession { agent: String, id: String },
@@ -204,6 +206,14 @@ pub enum Overlay {
         selected: usize,
         _sub: Subscription,
     },
+    /// Explorer → Move to…: pick a folder of the project for `source`.
+    MoveTo {
+        input: Entity<InputState>,
+        selected: usize,
+        source: PathBuf,
+        targets: Vec<PathBuf>,
+        _sub: Subscription,
+    },
     Prompt {
         title: String,
         description: String,
@@ -337,6 +347,63 @@ impl KernApp {
         cx.notify();
     }
 
+    pub fn open_move_to(&mut self, source: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = &self.project else { return };
+        if source == p.root {
+            self.toast("The project folder cannot be moved", true, cx);
+            return;
+        }
+        let name = source
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let targets = self.move_targets(&source);
+        let input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(format!("Move “{name}” to folder…")));
+        input.update(cx, |i, cx| i.focus(window, cx));
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut KernApp, _, ev: &InputEvent, w, cx| match ev {
+                InputEvent::Change => {
+                    if let Some(Overlay::MoveTo { selected, .. }) = &mut this.overlay {
+                        *selected = 0;
+                    }
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.accept_overlay(w, cx),
+                _ => {}
+            },
+        );
+        self.overlay_return = Some(self.tree_focus.clone());
+        self.overlay = Some(Overlay::MoveTo {
+            input,
+            selected: 0,
+            source,
+            targets,
+            _sub: sub,
+        });
+        cx.notify();
+    }
+
+    /// Folders whose path contains every word typed; the project root is "/".
+    fn move_matches(&self, query: &str, targets: &[PathBuf]) -> Vec<PathBuf> {
+        let words: Vec<String> = query
+            .to_lowercase()
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        targets
+            .iter()
+            .filter(|rel| {
+                let shown = format!("/{}", rel.to_string_lossy().replace('\\', "/")).to_lowercase();
+                words.iter().all(|w| shown.contains(w.as_str()))
+            })
+            .take(50)
+            .cloned()
+            .collect()
+    }
+
     pub fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command"));
         input.update(cx, |i, cx| i.focus(window, cx));
@@ -451,6 +518,9 @@ impl KernApp {
             Some(Overlay::Language { input, .. }) => {
                 Self::language_matches(input.read(cx).value().as_ref()).len()
             }
+            Some(Overlay::MoveTo { input, targets, .. }) => self
+                .move_matches(input.read(cx).value().as_ref(), targets)
+                .len(),
             _ => 0,
         };
         if len == 0 {
@@ -459,7 +529,8 @@ impl KernApp {
         if let Some(
             Overlay::QuickOpen { selected, .. }
             | Overlay::Palette { selected, .. }
-            | Overlay::Language { selected, .. },
+            | Overlay::Language { selected, .. }
+            | Overlay::MoveTo { selected, .. },
         ) = &mut self.overlay
         {
             *selected = ((*selected as i32 + delta).rem_euclid(len as i32)) as usize;
@@ -494,6 +565,23 @@ impl KernApp {
                     self.open_file_async(root.join(rel), true, None, window, cx);
                 }
                 cx.notify();
+            }
+            Some(Overlay::MoveTo {
+                input,
+                selected,
+                source,
+                targets,
+                ..
+            }) => {
+                let q = input.read(cx).value().to_string();
+                let picked = self.move_matches(&q, targets).get(*selected).cloned();
+                let source = source.clone();
+                self.close_overlay(window, cx);
+                if let (Some(rel), Some(root)) =
+                    (picked, self.project.as_ref().map(|p| p.root.clone()))
+                {
+                    self.move_item(&source, &root.join(rel), cx);
+                }
             }
             Some(Overlay::Palette {
                 input, selected, ..
@@ -574,50 +662,8 @@ impl KernApp {
         if value.is_empty() {
             return;
         }
-        let root = self.project.as_ref().map(|p| p.root.clone());
-        // New items: a bad or taken name is reported in the prompt, which stays open.
-        let created = match (&kind, &root) {
-            (PromptKind::NewFile(dir), Some(root)) => Some(
-                crate::workspace::tree::create_file(root, dir, &value).map(|p| (dir, p, false)),
-            ),
-            (PromptKind::NewFolder(dir), Some(root)) => {
-                Some(crate::workspace::tree::create_dir(root, dir, &value).map(|p| (dir, p, true)))
-            }
-            _ => None,
-        };
-        match created {
-            Some(Err(e)) => {
-                if let Some(Overlay::Prompt {
-                    error, error_value, ..
-                }) = &mut self.overlay
-                {
-                    *error = Some(e.to_string());
-                    *error_value = value.clone();
-                }
-                cx.notify();
-                return;
-            }
-            Some(Ok((dir, path, is_dir))) => {
-                self.overlay = None;
-                let dir = dir.clone();
-                self.after_create(&dir, path, is_dir, window, cx);
-                cx.notify();
-                return;
-            }
-            None => {}
-        }
         self.overlay = None;
         match kind {
-            PromptKind::NewFile(_) | PromptKind::NewFolder(_) => {}
-            PromptKind::Rename(old) => match crate::workspace::tree::rename(&old, &value) {
-                Ok(new) => {
-                    self.after_rename(&old, &new, cx);
-                    if let Some(parent) = old.parent() {
-                        self.refresh_tree_dir(parent, cx);
-                    }
-                }
-                Err(e) => self.toast(e.to_string(), true, cx),
-            },
             PromptKind::CloneUrl => self.clone_with_destination(value, window, cx),
             PromptKind::NewBranch => self.git_switch(value, true, cx),
             PromptKind::RenameSession { agent, id } => self.rename_session(&agent, &id, &value, cx),
@@ -625,7 +671,7 @@ impl KernApp {
         cx.notify();
     }
 
-    fn apply_confirm(
+    pub(crate) fn apply_confirm(
         &mut self,
         action: ConfirmAction,
         window: &mut Window,
@@ -655,6 +701,7 @@ impl KernApp {
             ConfirmAction::ExtensionOff { id, uninstall } => {
                 self.force_extension_off(&id, uninstall, window, cx)
             }
+            ConfirmAction::Trash { path, save_first } => self.trash_now(path, save_first, cx),
             ConfirmAction::DiscardAndQuit => {
                 self.shutdown_processes();
                 self.persist();
@@ -865,6 +912,61 @@ impl KernApp {
                             .into_any_element()
                     }),
                 )
+            }
+            Overlay::MoveTo {
+                input,
+                selected,
+                source,
+                targets,
+                ..
+            } => {
+                let q = input.read(cx).value().to_string();
+                let matches = self.move_matches(&q, targets);
+                let selected = *selected;
+                let input = input.clone();
+                let source = source.clone();
+                let root: PathBuf = self
+                    .project
+                    .as_ref()
+                    .map(|p| p.root.clone())
+                    .unwrap_or_default();
+                let project = self
+                    .project
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                let mut items: Vec<AnyElement> = matches
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, rel)| {
+                        let dest = root.join(&rel);
+                        let source = source.clone();
+                        let shown = if rel.as_os_str().is_empty() {
+                            format!("{project} (project root)")
+                        } else {
+                            rel.to_string_lossy().replace('\\', "/")
+                        };
+                        row_item(("mv", i), i == selected, palette)
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                this.close_overlay(w, cx);
+                                this.move_item(&source, &dest, cx);
+                            }))
+                            .child(div().text_size(px(13.)).child(shown))
+                            .into_any_element()
+                    })
+                    .collect();
+                if items.is_empty() {
+                    items.push(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_size(px(12.))
+                            .text_color(palette.muted)
+                            .child("No folder matches")
+                            .into_any_element(),
+                    );
+                }
+                list_box(&input, palette, items.into_iter())
             }
             Overlay::Palette {
                 input, selected, ..

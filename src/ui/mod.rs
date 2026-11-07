@@ -23,6 +23,7 @@ pub mod settings_panel;
 pub mod start;
 pub mod terminal_view;
 pub mod theme;
+pub mod tree_ops;
 pub mod updates;
 pub mod widgets;
 
@@ -66,7 +67,8 @@ gpui_kit::actions!(
         TreeDown,
         TreeLeft,
         TreeRight,
-        TreeActivate
+        TreeActivate,
+        CancelTreeEdit
     ]
 );
 
@@ -104,6 +106,15 @@ fn keymap(cx: &mut App) {
         KeyBinding::new("right", TreeRight, Some("KernTree")),
         KeyBinding::new("enter", TreeActivate, Some("KernTree")),
         KeyBinding::new("space", TreeActivate, Some("KernTree")),
+        // The name field in the tree: Esc cancels, and the tree's own keys
+        // (Space opens, arrows move) do not apply while typing a name.
+        KeyBinding::new("escape", CancelTreeEdit, Some("KernTreeEdit")),
+        KeyBinding::new("space", NoAction, Some("KernTreeEdit")),
+        KeyBinding::new("up", NoAction, Some("KernTreeEdit")),
+        KeyBinding::new("down", NoAction, Some("KernTreeEdit")),
+        KeyBinding::new("left", NoAction, Some("KernTreeEdit")),
+        KeyBinding::new("right", NoAction, Some("KernTreeEdit")),
+        KeyBinding::new("enter", NoAction, Some("KernTreeEdit")),
     ]);
     if !cfg!(target_os = "macos") {
         // A shell owns Ctrl+letter (Ctrl+R history, Ctrl+B back...): with a terminal

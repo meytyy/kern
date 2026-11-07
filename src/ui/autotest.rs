@@ -966,6 +966,55 @@ impl KernApp {
                 _ => return Err("no prompt".into()),
             },
             "submitprompt" => self.submit_prompt(w, cx),
+            "treenew" => {
+                // treenew <folder|.> file|folder
+                let (rel, kind) = arg.split_once(' ').ok_or("dir kind")?;
+                let root = self.project.as_ref().ok_or("no project")?.root.clone();
+                let dir = if rel == "." { root } else { root.join(rel) };
+                self.start_new_item(dir, kind == "folder", w, cx);
+            }
+            "treerename" => {
+                let root = self.project.as_ref().ok_or("no project")?.root.clone();
+                self.start_rename(root.join(arg), w, cx);
+            }
+            "editset" => {
+                let input = self
+                    .project
+                    .as_ref()
+                    .and_then(|p| p.tree.edit.as_ref())
+                    .map(|e| e.input.clone())
+                    .ok_or("no name field")?;
+                input.update(cx, |i, cx| i.set_value(arg.to_string(), w, cx));
+            }
+            "moveitem" => {
+                let (src, dest) = arg.split_once(" -> ").ok_or("src -> dest")?;
+                let root = self.project.as_ref().ok_or("no project")?.root.clone();
+                let dest = if dest == "." {
+                    root.clone()
+                } else {
+                    root.join(dest)
+                };
+                self.move_item(&root.join(src), &dest, cx);
+            }
+            "openmoveto" => {
+                let root = self.project.as_ref().ok_or("no project")?.root.clone();
+                self.open_move_to(root.join(arg), w, cx);
+            }
+            "trash" => {
+                let root = self.project.as_ref().ok_or("no project")?.root.clone();
+                self.request_trash(root.join(arg), cx);
+            }
+            "confirmchoose" => {
+                let action = match &self.overlay {
+                    Some(super::overlays::Overlay::Confirm { choices, .. }) => choices
+                        .iter()
+                        .find(|c| c.label.to_string().contains(arg))
+                        .map(|c| c.action.clone())
+                        .ok_or("no such choice")?,
+                    _ => return Err("no confirmation".into()),
+                };
+                self.apply_confirm(action, w, cx);
+            }
             "assocvalues" => {
                 // Types into the File Associations fields; Add is clicked separately.
                 let (pat, lang) = arg.split_once(' ').ok_or("pattern language")?;
@@ -1172,6 +1221,82 @@ impl KernApp {
                     _ => Err("active tab is not a diff".into()),
                 }
             }
+            "edit" => {
+                let e = self.project.as_ref().and_then(|p| p.tree.edit.as_ref());
+                match (arg, e) {
+                    ("none", None) => Ok(String::new()),
+                    ("none", Some(_)) => Err("a name field is open".into()),
+                    (_, None) => Err("no name field".into()),
+                    ("field", Some(_)) => Ok(String::new()),
+                    (want, Some(e)) => {
+                        let want = want.strip_prefix("error ").unwrap_or(want);
+                        let err = e.error.clone().unwrap_or_default();
+                        ok(
+                            !err.is_empty() && err.contains(want),
+                            format!("error={err:?}"),
+                        )
+                    }
+                }
+            }
+            "editvalue" => {
+                let e = self
+                    .project
+                    .as_ref()
+                    .and_then(|p| p.tree.edit.as_ref())
+                    .ok_or("no name field")?;
+                let v = e.input.read(cx).value().to_string();
+                ok(v == arg, format!("value={v:?}"))
+            }
+            "editfocused" => {
+                let e = self
+                    .project
+                    .as_ref()
+                    .and_then(|p| p.tree.edit.as_ref())
+                    .ok_or("no name field")?;
+                ok(
+                    e.input.read(cx).focus_handle(cx).is_focused(_w),
+                    "not focused".into(),
+                )
+            }
+            "tabopen" => {
+                // tabopen <rel> [dirty]
+                let (rel, want_dirty) = match arg.strip_suffix(" dirty") {
+                    Some(r) => (r, true),
+                    None => (arg, false),
+                };
+                let p = self.project.as_ref().ok_or("no project")?;
+                let path = p.root.join(rel);
+                let tab = p
+                    .tabs
+                    .iter()
+                    .find(|t| t.file_path() == Some(path.as_path()));
+                let tabs: Vec<String> = p
+                    .tabs
+                    .iter()
+                    .filter_map(|t| t.file_path().map(|f| f.display().to_string()))
+                    .collect();
+                ok(
+                    tab.is_some_and(|t| !want_dirty || t.is_dirty()),
+                    format!("tabs={tabs:?}"),
+                )
+            }
+            "notabopen" => {
+                let p = self.project.as_ref().ok_or("no project")?;
+                let path = p.root.join(arg);
+                ok(
+                    !p.tabs
+                        .iter()
+                        .any(|t| t.file_path().is_some_and(|f| f.starts_with(&path))),
+                    "still open".into(),
+                )
+            }
+            "confirmbody" => match &self.overlay {
+                Some(super::overlays::Overlay::Confirm { body, choices, .. }) => {
+                    let labels: Vec<String> = choices.iter().map(|c| c.label.to_string()).collect();
+                    ok(body.contains(arg), format!("{body} {labels:?}"))
+                }
+                _ => Err("no confirmation".into()),
+            },
             "hasassoc" => ok(
                 self.settings.file_associations.contains_key(arg),
                 format!("{:?}", self.settings.file_associations),

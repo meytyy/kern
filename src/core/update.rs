@@ -413,4 +413,38 @@ mod tests {
         );
         assert_eq!(asset_names("macos", "aarch64")[0], "KERN-macos-arm64.zip");
     }
+
+    /// After a release: `curl` the GitHub release list into a file and run
+    ///   KERN_LIVE_RELEASES=releases.json KERN_LIVE_PREVIOUS=0.1.1 cargo test live_release
+    /// It checks that the previous version is offered this version's file for
+    /// each platform. Without the variable it does nothing.
+    #[test]
+    fn live_release_is_offered_to_the_previous_version() {
+        let Ok(path) = std::env::var("KERN_LIVE_RELEASES") else {
+            return;
+        };
+        let json = std::fs::read_to_string(path).unwrap();
+        let previous = v(&std::env::var("KERN_LIVE_PREVIOUS").unwrap());
+        let now = env!("CARGO_PKG_VERSION");
+        for (os, arch, file) in [
+            ("windows", "x86_64", "KERN-windows-x64-setup.exe"),
+            ("macos", "aarch64", "KERN-macos-arm64.zip"),
+        ] {
+            match evaluate(&json, &previous, os, arch).unwrap() {
+                Outcome::Available {
+                    version,
+                    download_url,
+                    ..
+                } => {
+                    assert_eq!(version, v(now), "{os}");
+                    assert_eq!(
+                        download_url,
+                        format!("https://github.com/meytyy/kern/releases/download/v{now}/{file}")
+                    );
+                    println!("{os} {arch}: v{version} -> {download_url}");
+                }
+                other => panic!("{os}: {other:?}"),
+            }
+        }
+    }
 }

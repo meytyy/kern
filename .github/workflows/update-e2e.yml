@@ -168,13 +168,13 @@ jobs:
           onversion $a confirmchoose Save and Restart
           # The new version, started again by the installer
           onversion $b sleep 3000
-          onversion $b version $b
+          onversion $b check version $b
           onversion $b open $proj
           onversion $b waitfor 15 project Проект с пробелами
           onversion $b check disk keep.txt unsaved
           onversion $b action AboutKern
           onversion $b sleep 300
-          onversion $b about Version $b
+          onversion $b check about Version $b
           onversion $b sleep 6000
           onversion $b quit
           "@ | Set-Content "$env:RUNNER_TEMP\script.txt"
@@ -206,7 +206,7 @@ jobs:
             Start-Sleep -Milliseconds 750
             $text = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
             foreach ($k in $marks.Keys) {
-              if (-not $taken[$k] -and $text -match [regex]::Escape("ok   $k")) { Start-Sleep -Milliseconds 400; Shot $marks[$k]; $taken[$k] = $true }
+              if (-not $taken[$k] -and $text -match ("ok   .*" + [regex]::Escape($k))) { Start-Sleep -Milliseconds 400; Shot $marks[$k]; $taken[$k] = $true }
             }
             if ($text -match "\[autotest $([regex]::Escape($env:VERSION_B))\] done") { break }
           }
@@ -217,19 +217,21 @@ jobs:
           Get-Content $log
           if ((Get-Item $exe).VersionInfo.ProductVersion -ne $env:VERSION_B) { throw "KERN was not updated" }
           if ((Select-String -Path $log -Pattern '^\[autotest .*\] FAIL').Count -gt 0) { throw "script steps failed" }
-          if (-not (Select-String -Path $log -Pattern "\[autotest $([regex]::Escape($env:VERSION_B))\] ok   about Version $([regex]::Escape($env:VERSION_B))")) { throw "About of the new version not seen" }
+          if (-not (Select-String -Path $log -Pattern "\[autotest $([regex]::Escape($env:VERSION_B))\] ok   check about Version $([regex]::Escape($env:VERSION_B))")) { throw "About of the new version not seen" }
           if (-not (Test-Path "$env:KERN_CONFIG_DIR\settings.json")) { throw "settings lost" }
 
       - name: Recycle Bin has the items, and one comes back
         if: always()
         run: |
           $bin = (New-Object -ComObject Shell.Application).NameSpace(10)
-          $names = @($bin.Items() | ForEach-Object { $_.Name })
-          $names | Tee-Object shots\recycle-bin.txt
-          foreach ($n in 'Мой файл.txt', 'Папка с файлами', 'open.txt', 'dirty.txt') {
-            if ($names -notcontains $n) { throw "$n is not in the Recycle Bin" }
+          # Explorer shows names without known extensions; the original path is a column.
+          $items = @($bin.Items())
+          $orig = @($items | ForEach-Object { Join-Path $bin.GetDetailsOf($_, 1) $_.Name })
+          $orig | Tee-Object shots\recycle-bin.txt
+          foreach ($n in 'Мой файл', 'Папка с файлами', 'open', 'dirty') {
+            if (-not ($items | Where-Object { $_.Name -eq $n -or $_.Name -like "$n.*" })) { throw "$n is not in the Recycle Bin" }
           }
-          $item = $bin.Items() | Where-Object { $_.Name -eq 'Мой файл.txt' } | Select-Object -First 1
+          $item = $items | Where-Object { $_.Name -eq 'Мой файл' -or $_.Name -eq 'Мой файл.txt' } | Select-Object -First 1
           $item.InvokeVerb('undelete'); Start-Sleep 3
           $back = 'C:\kern-test\Проект с пробелами\Мой файл.txt'
           if (-not (Test-Path -LiteralPath $back)) { throw "not restored" }

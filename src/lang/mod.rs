@@ -46,6 +46,7 @@ pub enum BuiltinServer {
     Yaml,
     Docker,
     CMake,
+    CSharp,
 }
 
 /// Commands and install hint of a server. Selection logic for the three
@@ -154,6 +155,13 @@ impl BuiltinServer {
                 &["--stdio"],
                 &[".git"],
                 "npm install -g dockerfile-language-server-nodejs",
+            ),
+            BuiltinServer::CSharp => s(
+                "csharp-ls",
+                &["csharp-ls"],
+                &[],
+                &[".git"],
+                "dotnet tool install --global csharp-ls (needs the .NET SDK)",
             ),
             BuiltinServer::CMake => s(
                 "cmake-language-server",
@@ -314,6 +322,16 @@ pub const LANGUAGES: &[Language] = &[
         &[],
         Some(S::Clang),
         R::CMake,
+    ),
+    ts(
+        "csharp",
+        "C#",
+        "csharp",
+        "csharp",
+        &["cs", "csx"],
+        &[],
+        Some(S::CSharp),
+        R::None,
     ),
     ts(
         "cmake",
@@ -838,6 +856,8 @@ mod tests {
             ("a.h", "c"),
             ("a.cpp", "cpp"),
             ("a.hpp", "cpp"),
+            ("Program.cs", "csharp"),
+            ("Script.CSX", "csharp"),
             ("CMakeLists.txt", "cmake"),
             ("x.cmake", "cmake"),
             ("build.sh", "shell"),

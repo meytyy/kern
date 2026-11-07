@@ -17,7 +17,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=..\dist\windows
-OutputBaseFilename=KERN-{#AppVersion}-x64-setup
+OutputBaseFilename=KERN-windows-x64-setup
 SetupIconFile=..\assets\windows\kern.ico
 UninstallDisplayIcon={app}\KERN.exe
 Compression=lzma2
@@ -31,8 +31,12 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\dist\windows\KERN\KERN.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\KERN"; Filename: "{app}\KERN.exe"
-Name: "{autodesktop}\KERN"; Filename: "{app}\KERN.exe"; Tasks: desktopicon
+; The icon comes from KERN.exe itself (resource 1, assets/windows/kern.ico).
+Name: "{autoprograms}\KERN"; Filename: "{app}\KERN.exe"; IconFilename: "{app}\KERN.exe"; IconIndex: 0
+Name: "{autodesktop}\KERN"; Filename: "{app}\KERN.exe"; IconFilename: "{app}\KERN.exe"; IconIndex: 0; Tasks: desktopicon
 
 [Run]
+; After an update over an older KERN, Explorer may keep the previous icon for the
+; same path in its icon cache: this asks it to reload icons.
+Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Flags: runhidden skipifdoesntexist
 Filename: "{app}\KERN.exe"; Description: "{cm:LaunchProgram,KERN}"; Flags: nowait postinstall skipifsilent

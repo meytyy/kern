@@ -341,21 +341,39 @@ impl KernApp {
             .as_ref()
             .is_some_and(|p| p.terminals.is_empty())
         {
-            self.new_terminal_inner(false, window, cx);
+            self.new_terminal_inner(false, None, window, cx);
         }
     }
 
     pub fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_terminal_inner(true, window, cx);
+        self.new_terminal_inner(true, None, window, cx);
     }
 
-    fn new_terminal_inner(&mut self, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Explorer → Open in Integrated Terminal: a shell started in `dir`.
+    pub fn new_terminal_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_terminal_inner(true, Some(dir), window, cx);
+        self.persist();
+    }
+
+    fn new_terminal_inner(
+        &mut self,
+        focus: bool,
+        cwd: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let shell = self.settings.shell.clone();
         self.settings.layout.bottom_visible = true;
         let Some(p) = &mut self.project else { return };
         let n = p.terminals.len() + 1;
-        let root = p.root.clone();
-        let view = cx.new(|cx| TerminalView::new(format!("zsh {n}"), None, &root, shell, cx));
+        let root = cwd.filter(|d| d.is_dir()).unwrap_or_else(|| p.root.clone());
+        // Named after the shell that runs: zsh on a Mac, pwsh or powershell on Windows.
+        let shell_name = std::path::Path::new(&crate::platform::user_shell(shell.as_deref()))
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| "shell".into());
+        let view =
+            cx.new(|cx| TerminalView::new(format!("{shell_name} {n}"), None, &root, shell, cx));
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
         if focus {
             view.update(cx, |v, cx| v.focus(window, cx));

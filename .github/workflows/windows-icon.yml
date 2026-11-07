@@ -1,0 +1,109 @@
+name: Windows icon check
+
+# Builds the installer, installs KERN the way a user would (over the previous
+# release, and clean), and records how Windows shows the icon: the desktop
+# shortcut on a light and a dark desktop, Explorer, and the taskbar.
+on:
+  workflow_dispatch:
+
+jobs:
+  icon:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
+          rustup default stable
+
+      - name: Inno Setup
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build (release and installer)
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+
+      - name: Screenshot helpers
+        run: |
+          New-Item -ItemType Directory -Force -Path shots | Out-Null
+          @'
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Add-Type @"
+          using System; using System.Runtime.InteropServices;
+          public static class Desk {
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+            public static extern bool SystemParametersInfo(int a, int b, string c, int d);
+            [DllImport("user32.dll")] public static extern bool SetSysColors(int n, int[] e, int[] c);
+          }
+          "@
+          function Set-Desktop([string]$mode) {
+            $light = if ($mode -eq 'light') { 1 } else { 0 }
+            $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+            New-Item -Path $k -Force | Out-Null
+            Set-ItemProperty $k AppsUseLightTheme $light
+            Set-ItemProperty $k SystemUsesLightTheme $light
+            $rgb = if ($light) { 0xF3F3F3 } else { 0x202020 }
+            [Desk]::SetSysColors(1, @(1), @($rgb)) | Out-Null
+            [Desk]::SystemParametersInfo(0x14, 0, "", 3) | Out-Null   # no wallpaper
+            Start-Sleep 2
+          }
+          function Shot([string]$name) {
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("shots\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $bmp.Dispose()
+          }
+          function Shortcut-Icon([string]$name) {
+            $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'KERN.lnk'
+            $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+            "$name shortcut: target=$($sh.TargetPath) icon=$($sh.IconLocation)" | Tee-Object -Append shots\shortcut.txt
+            [System.Drawing.Icon]::ExtractAssociatedIcon($lnk).ToBitmap().Save("shots\$name-shortcut-icon.png")
+          }
+          function Minimize-All { (New-Object -ComObject Shell.Application).MinimizeAll(); Start-Sleep 2 }
+          '@ | Set-Content shots\helpers.ps1
+
+      - name: Install v0.1.0, then this build over it
+        run: |
+          . .\shots\helpers.ps1
+          Invoke-WebRequest https://github.com/meytyy/kern/releases/download/v0.1.0/KERN-windows-x64-setup.exe -OutFile old-setup.exe
+          Start-Process old-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -Wait
+          Minimize-All; Set-Desktop light; Shot 'old-desktop-light'; Shortcut-Icon 'old'
+          Start-Process dist\windows\KERN-windows-x64-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -Wait
+          Minimize-All
+          Set-Desktop light; Shot 'update-desktop-light'
+          Set-Desktop dark; Shot 'update-desktop-dark'
+          Shortcut-Icon 'update'
+
+      - name: Explorer and taskbar
+        run: |
+          . .\shots\helpers.ps1
+          $app = Join-Path $env:ProgramFiles 'KERN'
+          Start-Process explorer.exe $app; Start-Sleep 4; Shot 'explorer'
+          $p = Start-Process (Join-Path $app 'KERN.exe') -PassThru; Start-Sleep 8; Shot 'taskbar-running'
+          Stop-Process -Id $p.Id -Force
+
+      - name: Clean install
+        run: |
+          . .\shots\helpers.ps1
+          $un = Join-Path $env:ProgramFiles 'KERN\unins000.exe'
+          Start-Process $un -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          Start-Sleep 3
+          Start-Process dist\windows\KERN-windows-x64-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -Wait
+          Minimize-All
+          Set-Desktop light; Shot 'clean-desktop-light'
+          Set-Desktop dark; Shot 'clean-desktop-dark'
+          Shortcut-Icon 'clean'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-icon-shots
+          path: |
+            shots/*.png
+            shots/shortcut.txt
+            dist/windows/KERN-windows-x64-setup.exe

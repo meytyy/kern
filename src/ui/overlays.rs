@@ -1,5 +1,6 @@
 //! Modal surfaces: quick open, command palette, prompts, confirmations, GitHub.
 use super::app::*;
+use super::keys;
 use super::theme::pal;
 use super::widgets::*;
 use super::*;
@@ -58,6 +59,8 @@ pub enum PromptKind {
 pub enum Command {
     OpenFolder,
     NewFile,
+    NewFolder,
+    CheckForUpdates,
     Save,
     CloseTab,
     ToggleSidebar,
@@ -90,43 +93,89 @@ pub enum Command {
     KillTerminal,
 }
 
-const COMMANDS: &[(&str, &str, Command)] = &[
-    ("Codex: New Chat", "", Command::CodexNewChat),
-    ("View: Toggle Word Wrap", "⌥Z", Command::ToggleWordWrap),
-    ("Editor: Change Language Mode", "", Command::ChangeLanguage),
-    ("Extensions: Show", "⇧⌘X", Command::Extensions),
-    ("File: Open Folder…", "⌘O", Command::OpenFolder),
-    ("File: New File", "⌘N", Command::NewFile),
-    ("File: Save", "⌘S", Command::Save),
-    ("File: Close Tab", "⌘W", Command::CloseTab),
-    ("Editor: Go to Definition", "F12", Command::GoToDefinition),
-    ("View: Toggle Sidebar", "⌘B", Command::ToggleSidebar),
-    ("View: Toggle Bottom Panel", "⌘J", Command::ToggleBottom),
-    ("View: Toggle Codex Panel", "⌥⌘C", Command::ToggleCodex),
+const COMMANDS: &[(&str, Option<keys::Keys>, Command)] = &[
+    ("Codex: New Chat", None, Command::CodexNewChat),
     (
-        "View: Toggle Light/Graphite Theme",
-        "",
+        "View: Toggle Word Wrap",
+        Some(keys::WORD_WRAP),
+        Command::ToggleWordWrap,
+    ),
+    (
+        "Editor: Change Language Mode",
+        None,
+        Command::ChangeLanguage,
+    ),
+    (
+        "Extensions: Show",
+        Some(keys::EXTENSIONS),
+        Command::Extensions,
+    ),
+    (
+        "File: Open Folder…",
+        Some(keys::OPEN_FOLDER),
+        Command::OpenFolder,
+    ),
+    ("File: New File", Some(keys::NEW_FILE), Command::NewFile),
+    ("File: New Folder", None, Command::NewFolder),
+    ("Help: Check for Updates", None, Command::CheckForUpdates),
+    ("File: Save", Some(keys::SAVE), Command::Save),
+    ("File: Close Tab", Some(keys::CLOSE_TAB), Command::CloseTab),
+    (
+        "Editor: Go to Definition",
+        Some(keys::GO_TO_DEFINITION),
+        Command::GoToDefinition,
+    ),
+    (
+        "View: Toggle Sidebar",
+        Some(keys::TOGGLE_SIDEBAR),
+        Command::ToggleSidebar,
+    ),
+    (
+        "View: Toggle Bottom Panel",
+        Some(keys::TOGGLE_BOTTOM),
+        Command::ToggleBottom,
+    ),
+    (
+        "View: Toggle Codex Panel",
+        Some(keys::TOGGLE_CODEX),
+        Command::ToggleCodex,
+    ),
+    (
+        "View: Toggle Graphite/Cream Theme",
+        None,
         Command::ToggleTheme,
     ),
-    ("Search: Find in Project", "⇧⌘F", Command::SearchProject),
-    ("Terminal: Toggle Terminal", "⌃`", Command::ToggleTerminal),
-    ("Terminal: Kill Terminal", "", Command::KillTerminal),
-    ("Terminal: New Terminal", "", Command::NewTerminal),
-    ("Claude Code: Open", "", Command::OpenClaude),
-    ("Claude Code: End Session", "", Command::ClaudeEnd),
-    ("Run: Start", "⌘R", Command::Run),
-    ("Run: Stop", "⌘.", Command::Stop),
-    ("Git: Source Control", "", Command::SourceControl),
-    ("Git: Clone Repository…", "", Command::CloneRepo),
-    ("GitHub: Clone from GitHub…", "", Command::CloneGithub),
-    ("Git: Pull", "", Command::GitPull),
-    ("Git: Push", "", Command::GitPush),
-    ("GitHub: Open Pull Request", "", Command::OpenPr),
-    ("Codex: Attach Current File", "", Command::AttachFile),
-    ("Codex: Attach Selection", "", Command::AttachSelection),
-    ("Codex: Review Diff", "", Command::ReviewDiff),
-    ("Project: Trust This Folder", "", Command::TrustFolder),
-    ("Preferences: Settings", "⌘,", Command::Settings),
+    (
+        "Search: Find in Project",
+        Some(keys::FIND_IN_PROJECT),
+        Command::SearchProject,
+    ),
+    (
+        "Terminal: Toggle Terminal",
+        Some(keys::TOGGLE_TERMINAL),
+        Command::ToggleTerminal,
+    ),
+    ("Terminal: Kill Terminal", None, Command::KillTerminal),
+    ("Terminal: New Terminal", None, Command::NewTerminal),
+    ("Claude Code: Open", None, Command::OpenClaude),
+    ("Claude Code: End Session", None, Command::ClaudeEnd),
+    ("Run: Start", Some(keys::RUN), Command::Run),
+    ("Run: Stop", Some(keys::STOP), Command::Stop),
+    ("Git: Source Control", None, Command::SourceControl),
+    ("Git: Clone Repository…", None, Command::CloneRepo),
+    ("GitHub: Clone from GitHub…", None, Command::CloneGithub),
+    ("Git: Pull", None, Command::GitPull),
+    ("Git: Push", None, Command::GitPush),
+    ("GitHub: Open Pull Request", None, Command::OpenPr),
+    ("Codex: Attach Current File", None, Command::AttachFile),
+    ("Codex: Attach Selection", None, Command::AttachSelection),
+    ("Codex: Review Diff", None, Command::ReviewDiff),
+    ("Project: Trust This Folder", None, Command::TrustFolder),
+    (
+        "Preferences: Settings",
+        Some(keys::SETTINGS),
+        Command::Settings,
+    ),
 ];
 
 pub enum GithubView {
@@ -160,6 +209,10 @@ pub enum Overlay {
         description: String,
         input: Entity<InputState>,
         kind: PromptKind,
+        /// Shown under the field; the prompt stays open so the name can be fixed.
+        error: Option<String>,
+        /// The text that produced `error`: editing it clears the message.
+        error_value: String,
         _sub: Subscription,
     },
     Confirm {
@@ -199,10 +252,25 @@ impl Overlay {
         let sub = cx.subscribe_in(
             &input,
             window,
-            |this: &mut KernApp, _, ev: &InputEvent, w, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. }) {
-                    this.submit_prompt(w, cx);
+            |this: &mut KernApp, _, ev: &InputEvent, w, cx| match ev {
+                InputEvent::PressEnter { .. } => this.submit_prompt(w, cx),
+                InputEvent::Change => {
+                    // The input also reports Change around Enter: only a real edit
+                    // of the rejected name clears the message.
+                    if let Some(Overlay::Prompt {
+                        input,
+                        error,
+                        error_value,
+                        ..
+                    }) = &mut this.overlay
+                        && error.is_some()
+                        && input.read(cx).value().trim() != error_value.as_str()
+                    {
+                        *error = None;
+                        cx.notify();
+                    }
                 }
+                _ => {}
             },
         );
         Overlay::Prompt {
@@ -210,6 +278,8 @@ impl Overlay {
             description: description.into(),
             input,
             kind,
+            error: None,
+            error_value: String::new(),
             _sub: sub,
         }
     }
@@ -449,6 +519,7 @@ impl KernApp {
             Command::ToggleTheme => self.toggle_theme(cx),
             Command::Settings => self.open_settings_tab(window, cx),
             Command::ToggleWordWrap => self.toggle_word_wrap(window, cx),
+            Command::CheckForUpdates => self.check_for_updates(true, cx),
             _ if !has_project => self.toast("Open a folder first", false, cx),
             Command::ChangeLanguage => self.open_language_picker(window, cx),
             Command::Extensions => {
@@ -458,6 +529,7 @@ impl KernApp {
             Command::CodexNewChat => self.codex_new_chat(cx),
             Command::ClaudeEnd => self.claude_end(window, cx),
             Command::NewFile => self.prompt_new_file(window, cx),
+            Command::NewFolder => self.prompt_new_folder(window, cx),
             Command::Save => self.save_active(false, window, cx),
             Command::CloseTab => self.close_active_tab(window, cx),
             Command::ToggleSidebar => self.toggle_panel(Dragging::Sidebar, window, cx),
@@ -502,19 +574,41 @@ impl KernApp {
         if value.is_empty() {
             return;
         }
+        let root = self.project.as_ref().map(|p| p.root.clone());
+        // New items: a bad or taken name is reported in the prompt, which stays open.
+        let created = match (&kind, &root) {
+            (PromptKind::NewFile(dir), Some(root)) => Some(
+                crate::workspace::tree::create_file(root, dir, &value).map(|p| (dir, p, false)),
+            ),
+            (PromptKind::NewFolder(dir), Some(root)) => {
+                Some(crate::workspace::tree::create_dir(root, dir, &value).map(|p| (dir, p, true)))
+            }
+            _ => None,
+        };
+        match created {
+            Some(Err(e)) => {
+                if let Some(Overlay::Prompt {
+                    error, error_value, ..
+                }) = &mut self.overlay
+                {
+                    *error = Some(e.to_string());
+                    *error_value = value.clone();
+                }
+                cx.notify();
+                return;
+            }
+            Some(Ok((dir, path, is_dir))) => {
+                self.overlay = None;
+                let dir = dir.clone();
+                self.after_create(&dir, path, is_dir, window, cx);
+                cx.notify();
+                return;
+            }
+            None => {}
+        }
         self.overlay = None;
         match kind {
-            PromptKind::NewFile(dir) => match crate::workspace::tree::create_file(&dir, &value) {
-                Ok(path) => {
-                    self.refresh_tree_dir(&dir, cx);
-                    self.open_file_async(path, true, None, window, cx);
-                }
-                Err(e) => self.toast(e.to_string(), true, cx),
-            },
-            PromptKind::NewFolder(dir) => match crate::workspace::tree::create_dir(&dir, &value) {
-                Ok(_) => self.refresh_tree_dir(&dir, cx),
-                Err(e) => self.toast(e.to_string(), true, cx),
-            },
+            PromptKind::NewFile(_) | PromptKind::NewFolder(_) => {}
             PromptKind::Rename(old) => match crate::workspace::tree::rename(&old, &value) {
                 Ok(new) => {
                     self.after_rename(&old, &new, cx);
@@ -794,7 +888,7 @@ impl KernApp {
                                 div()
                                     .text_size(px(11.))
                                     .text_color(palette.muted)
-                                    .child(shortcut(key)),
+                                    .child(key.map(|k| k.label()).unwrap_or_default()),
                             )
                             .into_any_element()
                     }),
@@ -804,6 +898,7 @@ impl KernApp {
                 title,
                 description,
                 input,
+                error,
                 ..
             } => panel(palette)
                 .p_3()
@@ -821,6 +916,15 @@ impl KernApp {
                         .child(description.clone()),
                 )
                 .child(Input::new(input))
+                .when_some(error.clone(), |d, e| {
+                    d.child(
+                        div()
+                            .id("prompt-error")
+                            .text_size(px(11.))
+                            .text_color(palette.danger)
+                            .child(e),
+                    )
+                })
                 .child(
                     div()
                         .flex()

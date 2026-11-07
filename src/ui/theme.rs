@@ -1,4 +1,4 @@
-//! Graphite dark theme with a lavender accent, plus a light theme.
+//! Graphite, a neutral dark grey theme, and the light Cream theme.
 use crate::core::settings::{Settings, ThemeChoice};
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
@@ -57,36 +57,39 @@ fn ca(hex: u32, alpha: f32) -> Hsla {
     h
 }
 
+/// Graphite: neutral greys with no hue in the chrome. Focus and selection are a
+/// light grey outline or tint; colour is left to syntax, errors and Git.
 pub fn dark() -> Palette {
-    let accent = c(0xc5b4f0);
+    let accent = c(0xd4d7dc);
     Palette {
-        bg: c(0x17171a),
-        editor: c(0x17171a),
-        panel: c(0x1b1b1f),
-        bar: c(0x1b1b1f),
-        hover: c(0x28282e),
-        active: c(0x32323a),
-        border: c(0x2b2b31),
-        fg: c(0xe6e6ea),
-        muted: c(0x92929d),
+        bg: c(0x191b1e),
+        editor: c(0x191b1e),
+        panel: c(0x222428),
+        bar: c(0x222428),
+        hover: c(0x2c2f34),
+        active: c(0x363940),
+        border: c(0x30333a),
+        fg: c(0xe7e9ec),
+        // 6.6:1 on the editor, 5.6:1 on panels.
+        muted: c(0xa0a6ae),
         accent,
-        accent_fill: accent,
-        accent_fill_hover: accent.opacity(0.9),
-        accent_fill_active: accent.opacity(0.8),
-        accent_fg: c(0x17171b),
-        accent_soft: ca(0xc5b4f0, 0.16),
+        accent_fill: c(0xd4d7dc),
+        accent_fill_hover: c(0xe7e9ec),
+        accent_fill_active: c(0xbfc3c9),
+        accent_fg: c(0x191b1e),
+        accent_soft: ca(0xe7e9ec, 0.09),
         danger: c(0xf2777a),
         success: c(0x8bd49c),
         warning: c(0xe6c07b),
-        selection: ca(0xc5b4f0, 0.28),
-        surface: c(0x222227),
-        user_bubble: c(0x2c2a36),
+        selection: ca(0x9aa4b2, 0.30),
+        surface: c(0x26282d),
+        user_bubble: c(0x2c2f34),
         tint_blue: c(0x8fb4e8),
         tint_green: c(0x8fcf9f),
         tint_yellow: c(0xdcc27e),
         tint_orange: c(0xdfa07c),
         tint_purple: c(0xbba6e6),
-        tint_folder: c(0xa9a4c4),
+        tint_folder: c(0xaab1ba),
         tint_cyan: c(0x7fcfd6),
         tint_red: c(0xe58a8f),
         tint_pink: c(0xe39ac6),
@@ -221,12 +224,12 @@ pub fn apply(settings: &Settings, cx: &mut App) {
         hl.style.editor_active_line = Some(if !editor.active_line {
             p.bg
         } else if p.dark {
-            c(0x1f1f25)
+            c(0x202226)
         } else {
             c(0xf3f3f7)
         });
         hl.style.editor_line_number = Some(p.muted);
-        hl.style.editor_active_line_number = Some(p.accent);
+        hl.style.editor_active_line_number = Some(p.fg);
         hl.style.syntax = syntax_colors(p.dark);
         t.highlight_theme = Arc::new(hl);
     });
@@ -235,8 +238,9 @@ pub fn apply(settings: &Settings, cx: &mut App) {
 fn syntax_colors(dark: bool) -> gpui_kit::component::highlighter::SyntaxColors {
     let (keyword, string, comment, function, ty, number, tag, attr, prop, punct, fg) = if dark {
         (
-            "#C5B4F0", "#A9DC9D", "#6F6F7B", "#8FB8F6", "#7FDBCA", "#E6C07B", "#F2A0A8", "#E6C07B",
-            "#CFCFD6", "#9C9CA8", "#E4E4E8",
+            // Comments 4.6:1 on #191B1E: quiet, still readable.
+            "#C5B4F0", "#A9DC9D", "#858C96", "#8FB8F6", "#7FDBCA", "#E6C07B", "#F2A0A8", "#E6C07B",
+            "#D2D6DB", "#A0A6AE", "#E7E9EC",
         )
     } else {
         (

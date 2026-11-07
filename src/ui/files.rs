@@ -5,6 +5,7 @@ use super::widgets::*;
 use super::*;
 use crate::git::status::FileState;
 use crate::workspace::tree::{self, Entry};
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
@@ -16,6 +17,8 @@ pub struct TreeState {
     pub children: HashMap<PathBuf, Vec<Entry>>,
     pub selected: Option<PathBuf>,
     pub scroll: UniformListScrollHandle,
+    /// A just-created item to scroll into view once its folder has been listed.
+    pub reveal: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -49,6 +52,7 @@ impl KernApp {
                         p.tree.expanded.remove(&target);
                     }
                 }
+                this.reveal_pending();
                 cx.notify();
             })
             .ok();
@@ -92,6 +96,73 @@ impl KernApp {
             walk(&p.root, 1, &p.tree, &mut out);
         }
         out
+    }
+
+    /// Scroll to `tree.reveal` when its row exists.
+    fn reveal_pending(&mut self) {
+        let Some(target) = self.project.as_ref().and_then(|p| p.tree.reveal.clone()) else {
+            return;
+        };
+        let rows = self.visible_rows();
+        if let Some(ix) = rows.iter().position(|r| r.entry.path == target)
+            && let Some(p) = &mut self.project
+        {
+            p.tree.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            p.tree.reveal = None;
+        }
+    }
+
+    /// A file or folder was created under `dir`: show it, select it, refresh Git.
+    /// A new file opens in a focused tab; a new folder keeps the focus in the tree.
+    pub fn after_create(
+        &mut self,
+        dir: &Path,
+        path: PathBuf,
+        is_dir: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(p) = &mut self.project else { return };
+        // Every folder from `dir` down to the item's parent is listed again: names
+        // like `a/b/c.txt` create the folders in between.
+        let mut to_list = Vec::new();
+        let mut cursor = path.parent();
+        while let Some(d) = cursor {
+            if !d.starts_with(&p.root) {
+                break;
+            }
+            to_list.push(d.to_path_buf());
+            if d == dir || d == p.root {
+                break;
+            }
+            cursor = d.parent();
+        }
+        // Ancestors above `dir` must be open too, or the new row stays hidden.
+        let mut up = dir.to_path_buf();
+        while up.starts_with(&p.root) {
+            p.tree.expanded.insert(up.clone());
+            if up == p.root || !up.pop() {
+                break;
+            }
+        }
+        for d in &to_list {
+            p.tree.expanded.insert(d.clone());
+        }
+        p.tree.selected = Some(path.clone());
+        p.tree.reveal = Some(path.clone());
+        for d in to_list.iter().rev() {
+            self.refresh_tree_dir(d, cx);
+        }
+        self.refresh_git(cx);
+        self.refresh_file_index(cx);
+        if is_dir {
+            self.settings.layout.sidebar_visible = true;
+            self.side = SideView::Files;
+            window.focus(&self.tree_focus, cx);
+        } else {
+            self.open_file_async(path, true, None, window, cx);
+        }
+        cx.notify();
     }
 
     fn toggle_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -190,26 +261,61 @@ impl KernApp {
         })
     }
 
+    /// "In project/sub/folder" for the prompts.
+    fn location_label(&self, dir: &Path) -> String {
+        let Some(p) = &self.project else {
+            return dir.display().to_string();
+        };
+        match dir.strip_prefix(&p.root) {
+            Ok(rest) if rest.as_os_str().is_empty() => format!("In {}", p.name),
+            Ok(rest) => format!(
+                "In {}/{}",
+                p.name,
+                rest.to_string_lossy().replace('\\', "/")
+            ),
+            Err(_) => format!("In {}", dir.display()),
+        }
+    }
+
+    /// File → New File, the Explorer header and the palette: in the selected
+    /// folder, the selected file's folder, or the project root.
     pub fn prompt_new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dir) = self.target_dir() else { return };
-        self.overlay = Some(overlays::Overlay::prompt(
-            "New File",
-            format!("In {}", dir.display()),
-            "",
-            overlays::PromptKind::NewFile(dir),
-            window,
-            cx,
-        ));
-        cx.notify();
+        match self.target_dir() {
+            Some(dir) => self.prompt_new_in(dir, false, window, cx),
+            None => self.toast("Open a folder first", false, cx),
+        }
     }
 
     pub fn prompt_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dir) = self.target_dir() else { return };
+        match self.target_dir() {
+            Some(dir) => self.prompt_new_in(dir, true, window, cx),
+            None => self.toast("Open a folder first", false, cx),
+        }
+    }
+
+    /// The one prompt for new items, whichever command asked for it. The name
+    /// field takes the focus at once; Enter creates, Esc cancels.
+    pub fn prompt_new_in(
+        &mut self,
+        dir: PathBuf,
+        folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project.is_none() {
+            return;
+        }
+        self.overlay_return = None;
+        let (title, kind) = if folder {
+            ("New Folder", overlays::PromptKind::NewFolder(dir.clone()))
+        } else {
+            ("New File", overlays::PromptKind::NewFile(dir.clone()))
+        };
         self.overlay = Some(overlays::Overlay::prompt(
-            "New Folder",
-            format!("In {}", dir.display()),
+            title,
+            self.location_label(&dir),
             "",
-            overlays::PromptKind::NewFolder(dir),
+            kind,
             window,
             cx,
         ));
@@ -308,6 +414,7 @@ impl KernApp {
             "file-tree",
             count,
             cx.processor(move |_this, range: std::ops::Range<usize>, _w, cx| {
+                let app = cx.entity();
                 let mut out = Vec::with_capacity(range.len());
                 for ix in range {
                     let row = rows[ix].clone();
@@ -404,6 +511,14 @@ impl KernApp {
                                     )
                                 },
                             )
+                            .context_menu({
+                                let app = app.clone();
+                                let path = row.entry.path.clone();
+                                let is_dir = row.entry.is_dir;
+                                move |menu, window, _cx| {
+                                    explorer_menu(menu, &app, &path, is_dir, !is_root, window)
+                                }
+                            })
                             .into_any_element(),
                     );
                 }
@@ -413,6 +528,24 @@ impl KernApp {
         .track_scroll(&scroll)
         .flex_1();
         let focus = self.tree_focus.clone();
+        // Below the last row: the menu targets the project root, whatever is selected.
+        let body = div()
+            .id("explorer-body")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(list);
+        let body = match self.project.as_ref().map(|p| p.root.clone()) {
+            Some(root) => {
+                let app = cx.entity();
+                body.context_menu(move |menu, window, _cx| {
+                    explorer_menu(menu, &app, &root, true, false, window)
+                })
+                .into_any_element()
+            }
+            None => body.into_any_element(),
+        };
         div()
             .id("explorer")
             .key_context("KernTree")
@@ -460,8 +593,103 @@ impl KernApp {
                         )),
                     ),
             )
-            .child(list)
+            .child(body)
     }
+}
+
+/// The Explorer's right-click menu for `path` (a folder, or a file whose folder
+/// gets the new items). `item_actions` adds Rename for real rows.
+fn explorer_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    app: &Entity<KernApp>,
+    path: &Path,
+    is_dir: bool,
+    item_actions: bool,
+    window: &mut Window,
+) -> gpui_kit::component::menu::PopupMenu {
+    use gpui_kit::component::menu::PopupMenuItem;
+    let dir = if is_dir {
+        path.to_path_buf()
+    } else {
+        path.parent().map(Path::to_path_buf).unwrap_or_default()
+    };
+    type Handler = Box<dyn Fn(&mut KernApp, &mut Window, &mut Context<KernApp>)>;
+    let on = |f: Handler| {
+        window.listener_for(app, move |t: &mut KernApp, _: &ClickEvent, w, cx| {
+            f(t, w, cx)
+        })
+    };
+    let (d1, d2, d3) = (dir.clone(), dir.clone(), dir.clone());
+    let (p1, p2, p3, p4) = (
+        path.to_path_buf(),
+        path.to_path_buf(),
+        path.to_path_buf(),
+        path.to_path_buf(),
+    );
+    let reveal = if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else {
+        "Show in File Explorer"
+    };
+    let mut menu = menu
+        .item(
+            PopupMenuItem::new("New File…").on_click(on(Box::new(move |t, w, cx| {
+                t.prompt_new_in(d1.clone(), false, w, cx)
+            }))),
+        )
+        .item(
+            PopupMenuItem::new("New Folder…").on_click(on(Box::new(move |t, w, cx| {
+                t.prompt_new_in(d2.clone(), true, w, cx)
+            }))),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new(reveal).on_click(on(Box::new(move |t, _, cx| {
+                if let Err(e) = crate::platform::reveal(&p1) {
+                    t.toast(format!("Cannot show it: {e}"), true, cx);
+                }
+            }))),
+        )
+        .item(
+            PopupMenuItem::new("Open in Integrated Terminal").on_click(on(Box::new(
+                move |t, w, cx| t.new_terminal_in(d3.clone(), w, cx),
+            ))),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new("Copy Path").on_click(on(Box::new(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(p2.display().to_string()));
+            }))),
+        )
+        .item(
+            PopupMenuItem::new("Copy Relative Path").on_click(on(Box::new(move |t, _, cx| {
+                let rel = t
+                    .project
+                    .as_ref()
+                    .and_then(|p| p3.strip_prefix(&p.root).ok().map(Path::to_path_buf))
+                    .unwrap_or_else(|| p3.clone());
+                // Forward slashes, as Git and most tools print project paths.
+                let text = rel.to_string_lossy().replace('\\', "/");
+                cx.write_to_clipboard(ClipboardItem::new_string(if text.is_empty() {
+                    ".".into()
+                } else {
+                    text
+                }));
+            }))),
+        );
+    if item_actions {
+        menu = menu
+            .separator()
+            .item(
+                PopupMenuItem::new("Rename…").on_click(on(Box::new(move |t, w, cx| {
+                    if let Some(p) = &mut t.project {
+                        p.tree.selected = Some(p4.clone());
+                    }
+                    t.prompt_rename(w, cx)
+                }))),
+            );
+    }
+    menu
 }
 
 fn git_color(state: FileState, p: super::theme::Palette) -> Hsla {

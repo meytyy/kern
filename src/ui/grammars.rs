@@ -8,6 +8,9 @@ use gpui_kit::*;
 use std::ops::Range;
 use std::rc::Rc;
 
+/// The C# query with KERN's capture order: see the file's header.
+pub const CSHARP_HIGHLIGHTS: &str = include_str!("../../assets/queries/csharp-highlights.scm");
+
 /// The TSX grammar shares its base rules with JavaScript. The stock registration
 /// loads only TypeScript's additions, so keywords and strings stay uncolored.
 pub fn register() {
@@ -39,6 +42,18 @@ pub fn register() {
             tree_sitter_swift::HIGHLIGHTS_QUERY,
             "",
             tree_sitter_swift::LOCALS_QUERY,
+        ),
+    );
+    // C# has no stock registration: `.cs` files opened as plain text.
+    registry.register(
+        "csharp",
+        &GrammarConfig::new(
+            "csharp",
+            tree_sitter_c_sharp::LANGUAGE.into(),
+            vec![],
+            CSHARP_HIGHLIGHTS,
+            "",
+            "",
         ),
     );
     // Same empty query for CMake in the stock registration.
@@ -238,6 +253,10 @@ mod tests {
                 "bash",
                 "# c\nset -e\nf() { echo \"x $1\"; }\nif [ -n \"$A\" ]; then f 1; fi\n",
             ),
+            (
+                "csharp",
+                "// c\n[Serializable]\npublic class P { public int A; }\nstring F(P p) => $\"x {p.A + 1}\";\n",
+            ),
             ("html", "<!-- c -->\n<div class=\"a\"><p>text</p></div>\n"),
             ("css", "/* c */\n.a > b { color: red; margin: 1px; }\n"),
             ("json", "{\"a\": 1, \"b\": \"x\", \"c\": true}\n"),
@@ -264,6 +283,14 @@ mod tests {
         assert!(failed.is_empty(), "not really highlighted: {failed:?}");
     }
 
+    /// Program.cs through KERN's real highlighter and theme: keywords, types,
+    /// methods, comments, attributes, strings and numbers each get a color.
+    #[::core::prelude::v1::test]
+    fn csharp_program_uses_many_colors() {
+        let n = distinct_colors("csharp", include_str!("../../tests/fixtures/Program.cs"));
+        assert!(n >= 7, "only {n} colors");
+    }
+
     #[::core::prelude::v1::test]
     fn tsx_distinguishes_keywords_strings_tags_and_attributes() {
         assert!(
@@ -287,5 +314,84 @@ mod tests {
         let inner = style_runs(&tokens, &(5..9), |_| HighlightStyle::default());
         assert_eq!(inner.first().unwrap().0.start, 5);
         assert_eq!(inner.last().unwrap().0.end, 9);
+    }
+}
+
+#[cfg(test)]
+mod csharp_tests {
+    use std::collections::HashMap;
+    use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
+
+    /// Capture names the way KERN's highlighter resolves them: for one node range
+    /// the first capture wins, an inner range overrides an outer one.
+    fn captures(src: &str) -> HashMap<String, String> {
+        let lang: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
+        let mut parser = Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        assert!(!tree.root_node().has_error(), "Program.cs parses cleanly");
+        let query = Query::new(&lang, super::CSHARP_HIGHLIGHTS).expect("query compiles");
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), src.as_bytes());
+        let mut by_range: HashMap<(usize, usize), String> = HashMap::new();
+        while let Some(m) = matches.next() {
+            for c in m.captures {
+                let r = (c.node.start_byte(), c.node.end_byte());
+                by_range
+                    .entry(r)
+                    .or_insert_with(|| query.capture_names()[c.index as usize].to_string());
+            }
+        }
+        // Text → capture, for the innermost (shortest) range of each text.
+        let mut out: HashMap<String, (usize, String)> = HashMap::new();
+        for ((a, b), name) in by_range {
+            let text = src[a..b].to_string();
+            let len = b - a;
+            match out.get(&text) {
+                Some((l, _)) if *l <= len => {}
+                _ => {
+                    out.insert(text, (len, name));
+                }
+            }
+        }
+        out.into_iter().map(|(k, (_, v))| (k, v)).collect()
+    }
+
+    #[test]
+    fn program_cs_gets_distinct_captures() {
+        let src = include_str!("../../tests/fixtures/Program.cs");
+        let c = captures(src);
+        let is = |text: &str, prefix: &str| {
+            let got = c.get(text).cloned().unwrap_or_default();
+            assert!(
+                got.starts_with(prefix),
+                "{text:?} is {got:?}, want {prefix}"
+            );
+        };
+        is("public", "keyword");
+        is("static", "keyword");
+        is("return", "keyword");
+        is("Person", "type");
+        is("Program", "type");
+        is("string", "type");
+        is("Main", "function");
+        is("WriteLine", "function");
+        is("Delay", "function");
+        is("Helper", "function");
+        is("Serializable", "attribute");
+        is("Obsolete", "attribute");
+        is("// Entry point.", "comment");
+        is("\"use Helper2\"", "string");
+        is("{", "punctuation");
+        is("true", "constant");
+        is("36", "number");
+        // The interpolated string is a string; its holes are code again.
+        let interp = c
+            .iter()
+            .find(|(k, _)| k.starts_with("$\"Hello"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        assert_eq!(interp, "string");
+        is("args", "variable");
     }
 }

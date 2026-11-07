@@ -48,6 +48,9 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
         std::env::var_os("KERN_CONFIG_DIR").is_some(),
         "KERN_AUTOTEST needs KERN_CONFIG_DIR"
     );
+    if std::env::var_os("KERN_AUTOTEST_FLOAT").is_some() {
+        float_test_window();
+    }
     let script = std::fs::read_to_string(&path).expect("script");
     let lines: Vec<String> = script
         .lines()
@@ -230,6 +233,58 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
                     })
                     .map_err(|e| e.to_string())
                 }
+                "rpress" => {
+                    // Right click, for context menus.
+                    let parts: Vec<f32> = arg.split(' ').filter_map(|v| v.parse().ok()).collect();
+                    let position = point(px(parts[0]), px(parts[1]));
+                    cx.update(|w, cx| {
+                        for down in [true, false] {
+                            let input = if down {
+                                PlatformInput::MouseDown(MouseDownEvent {
+                                    button: MouseButton::Right,
+                                    position,
+                                    modifiers: Modifiers::default(),
+                                    click_count: 1,
+                                    first_mouse: false,
+                                })
+                            } else {
+                                PlatformInput::MouseUp(MouseUpEvent {
+                                    button: MouseButton::Right,
+                                    position,
+                                    modifiers: Modifiers::default(),
+                                    click_count: 1,
+                                })
+                            };
+                            w.dispatch_event(input, cx);
+                        }
+                        String::new()
+                    })
+                    .map_err(|e| e.to_string())
+                }
+                "action" => {
+                    // The path a menu item takes: an action dispatched to the focus.
+                    use super::*;
+                    let action: Option<Box<dyn Action>> = match arg.as_str() {
+                        "NewTerminal" => Some(Box::new(NewTerminal)),
+                        "ToggleTerminal" => Some(Box::new(ToggleTerminal)),
+                        "KillTerminal" => Some(Box::new(KillTerminal)),
+                        "OpenClaude" => Some(Box::new(OpenClaude)),
+                        "NewFile" => Some(Box::new(NewFile)),
+                        "NewFolder" => Some(Box::new(NewFolder)),
+                        "CheckForUpdates" => Some(Box::new(CheckForUpdates)),
+                        "ToggleBottom" => Some(Box::new(ToggleBottom)),
+                        _ => None,
+                    };
+                    match action {
+                        Some(a) => cx
+                            .update(|w, cx| {
+                                w.dispatch_action(a, cx);
+                                String::new()
+                            })
+                            .map_err(|e| e.to_string()),
+                        None => Err(format!("unknown action {arg}")),
+                    }
+                }
                 "mouse" | "press" => {
                     // Real input through the window's hit testing, in logical pixels.
                     let parts: Vec<f32> = arg.split(' ').filter_map(|v| v.parse().ok()).collect();
@@ -309,6 +364,27 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
         }
     })
     .detach();
+}
+
+/// macOS stops redrawing a window that other windows cover completely, and clicks
+/// then hit a stale frame. Keeps the test window above others without activating
+/// it: the keyboard stays with whatever the person at the Mac is using.
+fn float_test_window() {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    unsafe {
+        let Some(class) = AnyClass::get(c"NSApplication") else {
+            return;
+        };
+        let app: Retained<AnyObject> = msg_send![class, sharedApplication];
+        let windows: Retained<AnyObject> = msg_send![&*app, windows];
+        let win: Option<Retained<AnyObject>> = msg_send![&*windows, firstObject];
+        if let Some(win) = win {
+            let _: () = msg_send![&*win, setLevel: 3isize];
+            let _: () = msg_send![&*win, orderFrontRegardless];
+        }
+    }
 }
 
 /// Works on the real AppKit window and its standard buttons.
@@ -882,6 +958,39 @@ impl KernApp {
             }
             "claude" => self.open_claude(w, cx),
             "newterminal" => self.new_terminal(w, cx),
+            "promptset" => match &self.overlay {
+                Some(super::overlays::Overlay::Prompt { input, .. }) => {
+                    let i = input.clone();
+                    i.update(cx, |i, cx| i.set_value(arg.to_string(), w, cx));
+                }
+                _ => return Err("no prompt".into()),
+            },
+            "submitprompt" => self.submit_prompt(w, cx),
+            "assocvalues" => {
+                // Types into the File Associations fields; Add is clicked separately.
+                let (pat, lang) = arg.split_once(' ').ok_or("pattern language")?;
+                let (a, b) = (
+                    self.settings_form.assoc_pattern.clone(),
+                    self.settings_form.assoc_language.clone(),
+                );
+                a.update(cx, |i, cx| i.set_value(pat.to_string(), w, cx));
+                b.update(cx, |i, cx| i.set_value(lang.to_string(), w, cx));
+            }
+            "panels" => {
+                // Shows the sidebar and the Codex panel without connecting Codex.
+                self.settings.layout.sidebar_visible = arg.contains("sidebar");
+                self.settings.layout.codex_visible = arg.contains("codex");
+            }
+            "updatebg" => self.check_for_updates(false, cx),
+            "updatelater" => self.updates.notice = None,
+            "selectpath" => {
+                let p = self.project.as_mut().ok_or("no project")?;
+                p.tree.selected = if arg.is_empty() {
+                    None
+                } else {
+                    Some(p.root.join(arg))
+                };
+            }
             "check" => return self.at_check(arg, w, cx),
             other => return Err(format!("unknown step {other}")),
         }
@@ -1062,6 +1171,103 @@ impl KernApp {
                     Tab::Diff(d) => ok(d.patch.contains(arg), format!("patch: {:?}", d.patch)),
                     _ => Err("active tab is not a diff".into()),
                 }
+            }
+            "hasassoc" => ok(
+                self.settings.file_associations.contains_key(arg),
+                format!("{:?}", self.settings.file_associations),
+            ),
+            "contentwidth" => {
+                let (op, v) = arg.split_at(1);
+                let v: f32 = v.trim().parse().map_err(|_| "number")?;
+                let w = self.settings_form.content_width;
+                ok(
+                    if op == "<" { w < v } else { w >= v },
+                    format!("content width {w}"),
+                )
+            }
+            "prompterror" => match &self.overlay {
+                Some(super::overlays::Overlay::Prompt { error, .. }) => ok(
+                    error.as_deref().is_some_and(|e| e.contains(arg)),
+                    format!("error={error:?}"),
+                ),
+                _ => Err("no prompt".into()),
+            },
+            "prompttitle" => match &self.overlay {
+                Some(super::overlays::Overlay::Prompt {
+                    title, description, ..
+                }) => {
+                    let s = format!("{title} | {description}");
+                    ok(s.contains(arg), s)
+                }
+                _ => Err("no prompt".into()),
+            },
+            "exists" | "isdir" | "isfile" | "missing" => {
+                let root = self.project.as_ref().ok_or("no project")?.root.clone();
+                let path = root.join(arg);
+                let good = match what {
+                    "exists" => path.exists(),
+                    "isdir" => path.is_dir(),
+                    "isfile" => path.is_file(),
+                    _ => !path.exists(),
+                };
+                ok(
+                    good,
+                    format!(
+                        "{} dir={} file={}",
+                        path.display(),
+                        path.is_dir(),
+                        path.is_file()
+                    ),
+                )
+            }
+            "toast" => {
+                let t = self.toast.as_ref().map(|t| t.0.clone());
+                ok(
+                    t.as_deref().is_some_and(|t| t.contains(arg)),
+                    format!("toast={t:?}"),
+                )
+            }
+            "updatenotice" => {
+                let n = self.updates.notice.as_ref().map(|n| n.version.clone());
+                let good = if arg == "none" {
+                    n.is_none()
+                } else {
+                    n.as_deref() == Some(arg)
+                };
+                ok(good, format!("notice={n:?}"))
+            }
+            "updateurl" => {
+                let n = self.updates.notice.as_ref().map(|n| n.download_url.clone());
+                ok(
+                    n.as_deref().is_some_and(|u| u.ends_with(arg)),
+                    format!("url={n:?}"),
+                )
+            }
+            "updateidle" => ok(!self.updates.checking, "still checking".into()),
+            "termtitle" => {
+                let t = self.at_terminal()?;
+                let title = t.read(cx).title.clone();
+                ok(title.contains(arg), title)
+            }
+            "treerow" => {
+                let p = self.project.as_ref().ok_or("no project")?;
+                let target = p.root.join(arg);
+                let listed = p
+                    .tree
+                    .children
+                    .get(target.parent().ok_or("no parent")?)
+                    .is_some_and(|l| l.iter().any(|e| e.path == target));
+                ok(listed, "not listed in the tree".into())
+            }
+            "gitstatus" => {
+                let p = self.project.as_ref().ok_or("no project")?;
+                let files: Vec<String> = p
+                    .git
+                    .status
+                    .as_ref()
+                    .map(|s| s.files.iter().map(|f| f.path.clone()).collect())
+                    .unwrap_or_default();
+                ok(files.iter().any(|f| f.contains(arg)), format!("{files:?}"))
             }
             "treeselected" => {
                 let p = self.project.as_ref().ok_or("no project")?;

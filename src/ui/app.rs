@@ -94,6 +94,9 @@ pub struct KernApp {
         Subscription,
     )>,
     pub login_view: Option<Entity<terminal_view::TerminalView>>,
+    pub updates: updates::UpdateState,
+    /// The menu bar drawn in the title bar (Windows).
+    pub menu_bar: Option<Entity<gpui_kit::component::menu::AppMenuBar>>,
     pub claude_key_input: Entity<gpui_kit::component::input::InputState>,
 }
 
@@ -165,6 +168,8 @@ impl KernApp {
             test_clipboard: None,
             effort_slider: None,
             login_view: None,
+            updates: Default::default(),
+            menu_bar: in_window_menu().then(|| gpui_kit::component::menu::AppMenuBar::new(cx)),
             claude_key_input,
         };
         window.on_window_should_close(cx, {
@@ -185,6 +190,7 @@ impl KernApp {
         }
         #[cfg(feature = "autotest")]
         autotest::maybe_start(window, cx);
+        app.schedule_update_check(cx);
         // After login env capture finishes, tool statuses may have changed.
         cx.spawn(async move |this, cx| {
             cx.background_spawn(async { crate::platform::tools::wait_for_environment() })
@@ -716,6 +722,16 @@ impl KernApp {
                 ))
             })
             .child(logo_image(18.))
+            .when_some(self.menu_bar.clone(), |d, bar| {
+                d.child(
+                    div()
+                        .id("app-menu")
+                        .h(px(26.))
+                        .flex_shrink_0()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(bar),
+                )
+            })
             .child(
                 div()
                     .text_size(px(13.))
@@ -756,7 +772,7 @@ impl KernApp {
                     icon_button(
                         "toggle-bottom",
                         "panel-bottom",
-                        format!("Toggle Bottom Panel ({})", shortcut("⌘J")),
+                        format!("Toggle Bottom Panel ({})", keys::TOGGLE_BOTTOM.label()),
                     )
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(
@@ -768,7 +784,7 @@ impl KernApp {
                         icon_button(
                             "toggle-codex",
                             "sparkles",
-                            format!("Toggle Codex Panel ({})", shortcut("⌥⌘C")),
+                            format!("Toggle Codex Panel ({})", keys::TOGGLE_CODEX.label()),
                         )
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(
@@ -1139,6 +1155,7 @@ impl Render for KernApp {
         let status = self.render_status(cx).into_any_element();
         let overlay = self.render_overlay(window, cx);
         let toast = self.render_toast(cx);
+        let update_notice = self.render_update_notice(cx);
         div()
             .id("kern-root")
             .key_context("KernApp")
@@ -1152,10 +1169,14 @@ impl Render for KernApp {
             .text_size(px(13.))
             .font_family(".SystemUIFont")
             .on_action(cx.listener(|this, _: &Save, w, cx| this.save_active(false, w, cx)))
-            .on_action(cx.listener(|this, _: &QuickOpen, w, cx| this.open_quick_open(w, cx)))
-            .on_action(
-                cx.listener(|this, _: &CommandPalette, w, cx| this.open_command_palette(w, cx)),
-            )
+            .on_action(cx.listener(|this, _: &QuickOpen, w, cx| {
+                this.open_quick_open(w, cx);
+                hold_focus(w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CommandPalette, w, cx| {
+                this.open_command_palette(w, cx);
+                hold_focus(w, cx);
+            }))
             .on_action(cx.listener(|this, _: &FindInProject, w, cx| {
                 this.side = SideView::Search;
                 this.settings.layout.sidebar_visible = true;
@@ -1163,36 +1184,69 @@ impl Render for KernApp {
                     p.search.input.update(cx, |i, cx| i.focus(w, cx));
                 }
                 cx.notify();
+                hold_focus(w, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, w, cx| {
-                this.toggle_panel(Dragging::Sidebar, w, cx)
+                this.toggle_panel(Dragging::Sidebar, w, cx);
+                hold_focus(w, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleBottom, w, cx| {
-                this.toggle_panel(Dragging::Bottom, w, cx)
+                this.toggle_panel(Dragging::Bottom, w, cx);
+                hold_focus(w, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &ToggleCodex, w, cx| {
-                    this.toggle_panel(Dragging::Codex, w, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &NewTerminal, w, cx| this.new_terminal(w, cx)))
-            .on_action(cx.listener(|this, _: &ToggleTerminal, w, cx| this.toggle_terminal(w, cx)))
+            .on_action(cx.listener(|this, _: &ToggleCodex, w, cx| {
+                this.toggle_panel(Dragging::Codex, w, cx);
+                hold_focus(w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewTerminal, w, cx| {
+                this.new_terminal(w, cx);
+                hold_focus(w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTerminal, w, cx| {
+                this.toggle_terminal(w, cx);
+                hold_focus(w, cx);
+            }))
             .on_action(cx.listener(|this, _: &CloseTab, w, cx| this.close_active_tab(w, cx)))
-            .on_action(cx.listener(|this, _: &OpenFolder, w, cx| this.pick_folder(w, cx)))
+            .on_action(cx.listener(|this, _: &OpenFolder, w, cx| {
+                this.pick_folder(w, cx);
+                hold_focus(w, cx);
+            }))
             .on_action(cx.listener(|this, _: &RunProject, w, cx| this.run_selected(w, cx)))
             .on_action(cx.listener(|this, _: &StopProject, _, cx| this.stop_run(cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
-            .on_action(cx.listener(|this, _: &OpenSettings, w, cx| this.open_settings_tab(w, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, w, cx| {
+                this.open_settings_tab(w, cx);
+                hold_focus(w, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleWordWrap, w, cx| this.toggle_word_wrap(w, cx)))
-            .on_action(
-                cx.listener(|this, _: &ChangeLanguage, w, cx| this.open_language_picker(w, cx)),
-            )
+            .on_action(cx.listener(|this, _: &ChangeLanguage, w, cx| {
+                this.open_language_picker(w, cx);
+                hold_focus(w, cx);
+            }))
             .on_action(cx.listener(|this, _: &ShowExtensions, w, cx| {
                 this.side = SideView::SourceControl;
-                this.show_side(SideView::Extensions, w, cx)
+                this.show_side(SideView::Extensions, w, cx);
+                hold_focus(w, cx);
             }))
-            .on_action(cx.listener(|this, _: &OpenClaude, w, cx| this.open_claude(w, cx)))
-            .on_action(cx.listener(|this, _: &NewFile, w, cx| this.prompt_new_file(w, cx)))
+            .on_action(cx.listener(|this, _: &OpenClaude, w, cx| {
+                this.open_claude(w, cx);
+                hold_focus(w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewFile, w, cx| {
+                this.prompt_new_file(w, cx);
+                hold_focus(w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewFolder, w, cx| {
+                this.prompt_new_folder(w, cx);
+                hold_focus(w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &KillTerminal, w, cx| {
+                this.kill_terminal(w, cx);
+                hold_focus(w, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(true, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &GoToDefinitionHere, w, cx| this.go_to_definition(w, cx)),
             )
@@ -1212,8 +1266,18 @@ impl Render for KernApp {
             .child(top)
             .child(body)
             .child(status)
+            .children(update_notice)
             .children(overlay)
             .children(toast)
+    }
+}
+
+/// Menu actions move the focus (a new terminal, a prompt). The title-bar menu on
+/// Windows gives the focus back to where it was when it opened, after the action
+/// ran: whatever the action focused is focused again once that has happened.
+fn hold_focus(window: &mut Window, cx: &mut App) {
+    if let Some(focused) = window.focused(cx) {
+        window.defer(cx, move |window, cx| window.focus(&focused, cx));
     }
 }
 

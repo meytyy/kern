@@ -41,6 +41,6 @@ jobs:
         with:
           name: kern-windows-x64
           path: |
-            dist/windows/*-setup.exe
-            dist/windows/*-portable.zip
+            dist/windows/KERN-windows-x64-setup.exe
+            dist/windows/KERN-windows-x64.zip
           if-no-files-found: error

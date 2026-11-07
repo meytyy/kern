@@ -116,3 +116,13 @@ pub fn executable_names(tool: &str) -> Vec<String> {
 /// Inside a virtual environment.
 pub const VENV_PYTHON: &str = "Scripts\\python.exe";
 pub const DEFAULT_PYTHON: &str = "python";
+
+/// Shows `path` selected in File Explorer. `/select,` takes the path as one
+/// argument, quoted, which `raw_arg` passes exactly as written.
+pub fn reveal(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{}\"", path.display()))
+        .spawn()
+        .map(|_| ())
+}

@@ -240,15 +240,15 @@ fn default_color(index: usize) -> alacritty_terminal::vte::ansi::Rgb {
     match index {
         // Background
         257 => Rgb {
-            r: 0x17,
-            g: 0x17,
-            b: 0x1b,
+            r: 0x19,
+            g: 0x1b,
+            b: 0x1e,
         },
         // Foreground and everything else
         _ => Rgb {
-            r: 0xe4,
-            g: 0xe4,
-            b: 0xe8,
+            r: 0xe7,
+            g: 0xe9,
+            b: 0xec,
         },
     }
 }

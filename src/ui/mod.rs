@@ -13,6 +13,7 @@ pub mod file_icons;
 pub mod files;
 pub mod grammars;
 pub mod graph_panel;
+pub mod keys;
 pub mod lsp_bridge;
 pub mod media;
 pub mod overlays;
@@ -22,6 +23,7 @@ pub mod settings_panel;
 pub mod start;
 pub mod terminal_view;
 pub mod theme;
+pub mod updates;
 pub mod widgets;
 
 #[cfg(feature = "autotest")]
@@ -51,6 +53,9 @@ gpui_kit::actions!(
         Quit,
         Dismiss,
         NewFile,
+        NewFolder,
+        KillTerminal,
+        CheckForUpdates,
         GoToDefinitionHere,
         OpenSettings,
         ToggleWordWrap,
@@ -66,39 +71,32 @@ gpui_kit::actions!(
 );
 
 fn keymap(cx: &mut App) {
-    // ⌘ on macOS, Ctrl elsewhere. Ctrl+Alt is AltGr on Windows, so no binding uses it there.
-    let m = if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    };
-    // Built once at startup; the keymap keeps the strings for the app's lifetime.
-    let k = |keys: &str| -> &'static str { Box::leak(keys.replace("cmd", m).into_boxed_str()) };
-    let codex = if cfg!(target_os = "macos") {
-        "cmd-alt-c"
-    } else {
-        "ctrl-shift-a"
-    };
+    use keys as k;
+    let b = |keys: k::Keys| keys.binding();
     cx.bind_keys([
-        KeyBinding::new(k("cmd-p"), QuickOpen, None),
-        KeyBinding::new(k("cmd-shift-p"), CommandPalette, None),
-        KeyBinding::new(k("cmd-shift-f"), FindInProject, None),
-        KeyBinding::new(k("cmd-b"), ToggleSidebar, None),
-        KeyBinding::new(k("cmd-j"), ToggleBottom, None),
-        KeyBinding::new("ctrl-`", ToggleTerminal, None),
-        KeyBinding::new(codex, ToggleCodex, None),
-        KeyBinding::new(k("cmd-o"), OpenFolder, None),
-        KeyBinding::new(k("cmd-q"), Quit, None),
-        KeyBinding::new(k("cmd-r"), RunProject, None),
-        KeyBinding::new(k("cmd-."), StopProject, None),
-        KeyBinding::new(k("cmd-,"), OpenSettings, None),
-        KeyBinding::new(k("cmd-shift-x"), ShowExtensions, None),
-        KeyBinding::new("alt-z", ToggleWordWrap, Some("KernEditor")),
+        KeyBinding::new(b(k::QUICK_OPEN), QuickOpen, None),
+        KeyBinding::new(b(k::COMMAND_PALETTE), CommandPalette, None),
+        KeyBinding::new(b(k::FIND_IN_PROJECT), FindInProject, None),
+        KeyBinding::new(b(k::TOGGLE_SIDEBAR), ToggleSidebar, None),
+        KeyBinding::new(b(k::TOGGLE_BOTTOM), ToggleBottom, None),
+        KeyBinding::new(b(k::TOGGLE_TERMINAL), ToggleTerminal, None),
+        KeyBinding::new(b(k::TOGGLE_CODEX), ToggleCodex, None),
+        KeyBinding::new(b(k::OPEN_FOLDER), OpenFolder, None),
+        KeyBinding::new(b(k::QUIT), Quit, None),
+        KeyBinding::new(b(k::RUN), RunProject, None),
+        KeyBinding::new(b(k::STOP), StopProject, None),
+        KeyBinding::new(b(k::SETTINGS), OpenSettings, None),
+        KeyBinding::new(b(k::EXTENSIONS), ShowExtensions, None),
+        KeyBinding::new(b(k::WORD_WRAP), ToggleWordWrap, Some("KernEditor")),
         // Editor only: while a terminal has focus these do not exist.
-        KeyBinding::new(k("cmd-s"), Save, Some("KernEditor")),
-        KeyBinding::new(k("cmd-w"), CloseTab, Some("KernEditor")),
-        KeyBinding::new(k("cmd-n"), NewFile, Some("KernEditor")),
-        KeyBinding::new("f12", GoToDefinitionHere, Some("KernEditor")),
+        KeyBinding::new(b(k::SAVE), Save, Some("KernEditor")),
+        KeyBinding::new(b(k::CLOSE_TAB), CloseTab, Some("KernEditor")),
+        KeyBinding::new(b(k::NEW_FILE), NewFile, Some("KernEditor")),
+        KeyBinding::new(
+            b(k::GO_TO_DEFINITION),
+            GoToDefinitionHere,
+            Some("KernEditor"),
+        ),
         KeyBinding::new("escape", Dismiss, Some("KernOverlay")),
         KeyBinding::new("up", TreeUp, Some("KernTree")),
         KeyBinding::new("down", TreeDown, Some("KernTree")),
@@ -110,41 +108,52 @@ fn keymap(cx: &mut App) {
     if !cfg!(target_os = "macos") {
         // A shell owns Ctrl+letter (Ctrl+R history, Ctrl+B back...): with a terminal
         // focused these keys reach it, not the application.
+        let shell_keys = [
+            k::QUICK_OPEN,
+            k::TOGGLE_SIDEBAR,
+            k::TOGGLE_BOTTOM,
+            k::OPEN_FOLDER,
+            k::QUIT,
+            k::RUN,
+            k::STOP,
+            k::SETTINGS,
+        ];
         cx.bind_keys(
-            [
-                "ctrl-p", "ctrl-b", "ctrl-j", "ctrl-o", "ctrl-q", "ctrl-r", "ctrl-.", "ctrl-,",
-            ]
-            .map(|key| KeyBinding::new(key, NoAction, Some("Terminal"))),
+            shell_keys.map(|keys| KeyBinding::new(keys.binding(), NoAction, Some("Terminal"))),
         );
     }
     terminal_view::bind_keys(cx);
 }
 
-fn menus(cx: &mut App) {
+fn menu_list() -> Vec<Menu> {
     use gpui_kit::component::input as gi;
-    cx.set_menus(vec![
-        Menu {
-            name: "KERN".into(),
-            disabled: false,
-            items: vec![
+    let menu = |name: &str, items| Menu {
+        name: name.to_string().into(),
+        disabled: false,
+        items,
+    };
+    vec![
+        menu(
+            "KERN",
+            vec![
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::action("Quit KERN", Quit),
             ],
-        },
-        Menu {
-            name: "File".into(),
-            disabled: false,
-            items: vec![
+        ),
+        menu(
+            "File",
+            vec![
                 MenuItem::action("Open Folder…", OpenFolder),
-                MenuItem::action("New File", NewFile),
+                MenuItem::action("New File…", NewFile),
+                MenuItem::action("New Folder…", NewFolder),
+                MenuItem::separator(),
                 MenuItem::action("Save", Save),
                 MenuItem::action("Close Tab", CloseTab),
             ],
-        },
-        Menu {
-            name: "Edit".into(),
-            disabled: false,
-            items: vec![
+        ),
+        menu(
+            "Edit",
+            vec![
                 MenuItem::action("Undo", gi::Undo),
                 MenuItem::action("Redo", gi::Redo),
                 MenuItem::separator(),
@@ -153,30 +162,54 @@ fn menus(cx: &mut App) {
                 MenuItem::action("Paste", gi::Paste),
                 MenuItem::action("Select All", gi::SelectAll),
             ],
-        },
-        Menu {
-            name: "View".into(),
-            disabled: false,
-            items: vec![
+        ),
+        menu(
+            "View",
+            vec![
                 MenuItem::action("Command Palette", CommandPalette),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Bottom Panel", ToggleBottom),
                 MenuItem::action("Toggle Codex Panel", ToggleCodex),
                 MenuItem::action("Toggle Theme", ToggleTheme),
             ],
-        },
-        Menu {
-            name: "Run".into(),
-            disabled: false,
-            items: vec![
+        ),
+        menu(
+            "Run",
+            vec![
                 MenuItem::action("Run", RunProject),
                 MenuItem::action("Stop", StopProject),
-                MenuItem::action("Open Claude Code", OpenClaude),
-                MenuItem::action("Toggle Terminal", ToggleTerminal),
-                MenuItem::action("New Terminal", NewTerminal),
             ],
-        },
-    ]);
+        ),
+        // The same actions as the panel buttons, Ctrl+` and the command palette.
+        menu(
+            "Terminal",
+            vec![
+                MenuItem::action("New Terminal", NewTerminal),
+                MenuItem::action("Show / Hide Terminal", ToggleTerminal),
+                MenuItem::action("Kill Terminal", KillTerminal),
+                MenuItem::separator(),
+                MenuItem::action("Open Claude Code", OpenClaude),
+            ],
+        ),
+        menu(
+            "Help",
+            vec![MenuItem::action("Check for Updates…", CheckForUpdates)],
+        ),
+    ]
+}
+
+/// macOS shows these in the system menu bar. Windows has none for this window
+/// style: the title bar draws them (`AppMenuBar`) from the same list.
+fn menus(cx: &mut App) {
+    cx.set_menus(menu_list());
+    let owned = menu_list().into_iter().map(Menu::owned).collect();
+    gpui_kit::base::GlobalState::global_mut(cx).set_app_menus(owned);
+}
+
+/// Whether the window draws its own menu bar. `KERN_IN_WINDOW_MENU=1` shows the
+/// Windows one on macOS too, for testing.
+pub fn in_window_menu() -> bool {
+    !cfg!(target_os = "macos") || std::env::var_os("KERN_IN_WINDOW_MENU").is_some()
 }
 
 /// Application entry point.

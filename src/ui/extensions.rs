@@ -570,8 +570,14 @@ impl KernApp {
                     .py_2()
                     .border_b_1()
                     .border_color(p.border)
-                    .child(div().w(px(120.)).text_size(px(13.)).child(def.name))
-                    .child(div().flex_1().child(chips))
+                    .child(
+                        div()
+                            .w(px(120.))
+                            .flex_shrink_0()
+                            .text_size(px(13.))
+                            .child(def.name),
+                    )
+                    .child(div().flex_1().min_w_0().flex().flex_wrap().child(chips))
                     .child(
                         button(("ext-open", i), "Open", p).on_click(
                             cx.listener(move |t, _, w, cx| t.open_extension_page(id, w, cx)),

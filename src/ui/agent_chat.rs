@@ -137,7 +137,11 @@ pub struct ChatState {
 
 impl ChatState {
     pub fn new(agent: AgentTab, window: &mut Window, cx: &mut Context<KernApp>) -> Self {
-        let placeholder = format!("Ask {} · {} to send", agent.short_name(), shortcut("⌘↩"));
+        let placeholder = format!(
+            "Ask {} · {} to send",
+            agent.short_name(),
+            super::keys::SEND.label()
+        );
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -1043,7 +1047,7 @@ impl KernApp {
                     format!("Chat with {} in {name}", agent.short_name()),
                     format!(
                         "Attach a file or selection with +, then press {}.",
-                        shortcut("⌘↩")
+                        super::keys::SEND.label()
                     ),
                     p,
                 ))
@@ -1552,7 +1556,7 @@ impl KernApp {
             Button::new("composer-send")
                 .primary()
                 .icon(icon("arrow-up").with_size(px(ICON_MD)))
-                .tooltip(format!("Send ({})", shortcut("⌘↩")))
+                .tooltip(format!("Send ({})", super::keys::SEND.label()))
                 .accessibility_label("Send")
                 .size(px(26.))
                 .rounded(px(13.))

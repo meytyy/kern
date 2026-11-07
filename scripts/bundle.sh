@@ -59,3 +59,11 @@ PLIST
 # Ad-hoc signature: enough for this Mac. Not for distribution.
 codesign --force --deep --sign - "$APP" >/dev/null
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"
+
+# Release file: the update check (src/core/update.rs) looks for exactly this name.
+if [ -z "$FEATURES" ]; then
+    ZIP=dist/KERN-macos-arm64.zip
+    rm -f "$ZIP"
+    ditto -c -k --keepParent "$APP" "$ZIP"
+    echo "Built $ZIP"
+fi

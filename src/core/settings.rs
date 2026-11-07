@@ -6,8 +6,12 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeChoice {
+    /// Graphite. Earlier builds called the dark theme Navy: that setting maps here.
     #[default]
+    #[serde(alias = "navy", alias = "graphite")]
     Dark,
+    /// Cream.
+    #[serde(alias = "cream")]
     Light,
     /// Follow the macOS appearance.
     System,
@@ -284,6 +288,30 @@ pub fn config_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navy_and_cream_from_earlier_builds_load_as_graphite_and_cream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        for (stored, want) in [
+            ("navy", ThemeChoice::Dark),
+            ("graphite", ThemeChoice::Dark),
+            ("dark", ThemeChoice::Dark),
+            ("cream", ThemeChoice::Light),
+            ("light", ThemeChoice::Light),
+            ("system", ThemeChoice::System),
+        ] {
+            std::fs::write(
+                &path,
+                format!("{{\"theme\": \"{stored}\", \"editor\": {{\"font_size\": 15}}}}"),
+            )
+            .unwrap();
+            let s = Settings::load_from(&path);
+            assert_eq!(s.theme, want, "{stored}");
+            // The rest of the file survives the migration.
+            assert_eq!(s.editor.font_size, 15.0);
+        }
+    }
 
     #[test]
     fn roundtrip_and_partial_files() {

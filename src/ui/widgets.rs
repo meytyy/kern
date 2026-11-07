@@ -24,22 +24,6 @@ pub fn icon_el(name: &'static str, size: f32, color: Hsla) -> impl IntoElement {
         .child(icon(name).with_size(px(size)).text_color(color))
 }
 
-/// A shortcut label written the macOS way, as this platform shows it.
-pub fn shortcut(mac: &str) -> String {
-    if cfg!(target_os = "macos") {
-        return mac.to_string();
-    }
-    if mac == "⌥⌘C" {
-        // Ctrl+Alt is AltGr on Windows keyboards: the panel uses Ctrl+Shift+A there.
-        return "Ctrl+Shift+A".into();
-    }
-    mac.replace("⇧⌘", "Ctrl+Shift+")
-        .replace('⌘', "Ctrl+")
-        .replace('⌥', "Alt+")
-        .replace('⌃', "Ctrl+")
-        .replace('↩', "Enter")
-}
-
 /// For a text area inside a form or chat: Tab moves on instead of typing spaces.
 pub fn tab_moves_focus(el: Div) -> Div {
     use gpui_kit::component::input::{IndentInline, OutdentInline};

@@ -6,14 +6,13 @@
 set -eu
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
-VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cargo xwin build --locked --profile xwin --target x86_64-pc-windows-msvc
 OUT=dist/windows/KERN
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp target/x86_64-pc-windows-msvc/xwin/kern.exe "$OUT/KERN.exe"
 cp README.md "$OUT/README.md"
-ZIP="dist/windows/KERN-$VERSION-x64-portable.zip"
+ZIP="dist/windows/KERN-windows-x64.zip"
 rm -f "$ZIP"
 (cd dist/windows && zip -qr "../../$ZIP" KERN)
 echo "Built $ZIP"

@@ -69,45 +69,144 @@ fn ignored_set(project: &Path, dir: &Path) -> std::collections::HashSet<String> 
     all
 }
 
-/// Reject names that would escape the directory.
+/// Check a name typed for a new or renamed item. `/` (and `\` on Windows) separate
+/// nested folders. Windows rules apply everywhere, so a project stays usable there.
 pub fn validate_name(name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(anyhow!("name is empty"));
+        return Err(anyhow!("Enter a name"));
     }
-    if name == "."
-        || name == ".."
-        || name.split('/').any(|c| c == ".." || c == ".")
-        || name.starts_with('/')
-    {
-        return Err(anyhow!("invalid name"));
+    if name.starts_with('/') || name.starts_with('\\') {
+        return Err(anyhow!(
+            "Use a name relative to the folder, not an absolute path"
+        ));
+    }
+    for part in split_name(name) {
+        check_component(part)?;
     }
     Ok(())
 }
 
-/// Create an empty file, refusing to touch an existing one.
-pub fn create_file(dir: &Path, name: &str) -> Result<PathBuf> {
-    validate_name(name)?;
-    let path = dir.join(name.trim());
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+fn split_name(name: &str) -> impl Iterator<Item = &str> {
+    name.split(|c| c == '/' || (cfg!(windows) && c == '\\'))
+}
+
+const RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn check_component(part: &str) -> Result<()> {
+    if part.is_empty() {
+        return Err(anyhow!("The name has an empty folder part"));
     }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| anyhow!("cannot create {}: {e}", path.display()))?;
+    if part == "." || part == ".." {
+        return Err(anyhow!(
+            "“{part}” cannot be used: the item must stay inside the project"
+        ));
+    }
+    if let Some(c) = part
+        .chars()
+        .find(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\') || (*c as u32) < 0x20)
+    {
+        let shown = if (c as u32) < 0x20 {
+            "control characters".to_string()
+        } else {
+            format!("“{c}”")
+        };
+        return Err(anyhow!(
+            "Names cannot contain {shown} (not allowed on Windows)"
+        ));
+    }
+    if part.ends_with('.') || part.ends_with(' ') {
+        return Err(anyhow!(
+            "Names cannot end with a dot or a space (not allowed on Windows)"
+        ));
+    }
+    let stem = part.split('.').next().unwrap_or(part).trim_end();
+    if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+        return Err(anyhow!("“{part}” is a reserved device name on Windows"));
+    }
+    if part.len() > 255 {
+        return Err(anyhow!("The name is too long"));
+    }
+    Ok(())
+}
+
+/// The new path for `name` under `dir`, refusing anything that would land outside
+/// `root`, including through a symbolic link.
+fn target_in(root: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
+    validate_name(name)?;
+    let mut path = dir.to_path_buf();
+    for part in split_name(name.trim()) {
+        path.push(part);
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|e| anyhow!("cannot read the project folder: {e}"))?;
+    // The deepest part that exists already decides where the item really goes.
+    let mut existing = path.parent();
+    while let Some(p) = existing {
+        if p.exists() {
+            break;
+        }
+        existing = p.parent();
+    }
+    let real = existing
+        .ok_or_else(|| anyhow!("invalid location"))?
+        .canonicalize()
+        .map_err(|e| anyhow!("cannot read {}: {e}", dir.display()))?;
+    if !real.starts_with(&root) {
+        return Err(anyhow!("The item must stay inside the project folder"));
+    }
     Ok(path)
 }
 
-pub fn create_dir(dir: &Path, name: &str) -> Result<PathBuf> {
-    validate_name(name)?;
-    let path = dir.join(name.trim());
+fn exists_error(path: &Path) -> anyhow::Error {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let kind = if path.is_dir() { "A folder" } else { "A file" };
+    anyhow!("{kind} named “{name}” already exists here")
+}
+
+/// Create an empty file inside `root`, refusing to touch an existing one.
+pub fn create_file(root: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
+    let path = target_in(root, dir, name)?;
     if path.exists() {
-        return Err(anyhow!("{} already exists", path.display()));
+        return Err(exists_error(&path));
     }
-    std::fs::create_dir_all(&path)?;
-    Ok(path)
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(_) => Ok(path),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists_error(&path)),
+        Err(e) => Err(anyhow!("cannot create {}: {e}", path.display())),
+    }
+}
+
+/// Create a folder inside `root`; an existing one is an error, not reused.
+pub fn create_dir(root: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
+    let path = target_in(root, dir, name)?;
+    if path.exists() {
+        return Err(exists_error(&path));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
+    }
+    match std::fs::create_dir(&path) {
+        Ok(()) => Ok(path),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists_error(&path)),
+        Err(e) => Err(anyhow!("cannot create {}: {e}", path.display())),
+    }
 }
 
 /// Rename without overwriting a different existing file.
@@ -134,19 +233,19 @@ mod tests {
     #[test]
     fn create_refuses_overwrite_and_traversal() {
         let d = tempfile::tempdir().unwrap();
-        let p = create_file(d.path(), "новый файл.ts").unwrap();
+        let p = create_file(d.path(), d.path(), "новый файл.ts").unwrap();
         std::fs::write(&p, "keep").unwrap();
-        assert!(create_file(d.path(), "новый файл.ts").is_err());
+        assert!(create_file(d.path(), d.path(), "новый файл.ts").is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "keep");
-        assert!(create_file(d.path(), "../evil").is_err());
+        assert!(create_file(d.path(), d.path(), "../evil").is_err());
         assert!(rename(&p, "a/../../b").is_err());
     }
 
     #[test]
     fn rename_refuses_to_clobber() {
         let d = tempfile::tempdir().unwrap();
-        let a = create_file(d.path(), "a").unwrap();
-        let b = create_file(d.path(), "b").unwrap();
+        let a = create_file(d.path(), d.path(), "a").unwrap();
+        let b = create_file(d.path(), d.path(), "b").unwrap();
         std::fs::write(&b, "b").unwrap();
         assert!(rename(&a, "b").is_err());
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "b");
@@ -180,5 +279,72 @@ mod tests {
                 .ignored
         );
         assert!(!list.iter().find(|e| e.name == "a.ts").unwrap().ignored);
+    }
+
+    #[test]
+    fn names_follow_windows_rules() {
+        for ok in [
+            ".gitignore",
+            "мой файл.md",
+            "a b c.txt",
+            "src/new.ts",
+            ".env.example",
+            "console.txt",
+        ] {
+            assert!(validate_name(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "  ",
+            "/abs",
+            "a/../b",
+            "..",
+            ".",
+            "a//b",
+            "con",
+            "CON.txt",
+            "nul",
+            "Com1.log",
+            "lpt9",
+            "a:b",
+            "a*b",
+            "q?",
+            "<x>",
+            "pipe|",
+            "quote\"",
+            "dot.",
+            "dir /x",
+            "tab\tname",
+            "back\\slash",
+        ] {
+            assert!(validate_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn folders_nest_and_never_overwrite() {
+        let d = tempfile::tempdir().unwrap();
+        let f = create_dir(d.path(), d.path(), "Новая папка").unwrap();
+        assert!(f.is_dir());
+        let err = create_dir(d.path(), d.path(), "Новая папка").unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        let nested = create_file(d.path(), &f, "a/b/.gitignore").unwrap();
+        assert!(nested.is_file() && nested.starts_with(&f));
+        // A file where a folder is asked for, and the other way round.
+        assert!(create_dir(d.path(), &f, "a/b/.gitignore").is_err());
+        assert!(create_file(d.path(), d.path(), "Новая папка").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_out_of_the_project_is_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), d.path().join("link")).unwrap();
+        assert!(create_file(d.path(), &d.path().join("link"), "x.txt").is_err());
+        assert!(create_dir(d.path(), d.path(), "link/sub").is_err());
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+        // A folder outside the root is refused as well.
+        assert!(create_file(d.path(), outside.path(), "y.txt").is_err());
     }
 }

@@ -115,6 +115,15 @@ pub fn parse_env_output(bytes: &[u8]) -> Option<HashMap<String, String>> {
     Some(env)
 }
 
+/// Shows `path` selected in Finder.
+pub fn reveal(path: &std::path::Path) -> std::io::Result<()> {
+    Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

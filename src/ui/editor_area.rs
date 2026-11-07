@@ -832,8 +832,8 @@ impl KernApp {
                 .text_size(px(12.))
                 .child(format!(
                     "{} to open a file  ·  {} for commands",
-                    shortcut("⌘P"),
-                    shortcut("⇧⌘P")
+                    super::keys::QUICK_OPEN.label(),
+                    super::keys::COMMAND_PALETTE.label()
                 ))
                 .into_any_element(),
         };

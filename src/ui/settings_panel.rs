@@ -58,7 +58,20 @@ pub struct SettingsForm {
     pub lsp_roots: Entity<InputState>,
     pub probes: BTreeMap<String, Probe>,
     pub probing: bool,
+    /// Width available to the rows, worked out from the window and the open panels
+    /// on each render. Rows stack and the language table becomes a list below
+    /// the thresholds in `Layout`.
+    pub content_width: f32,
     pub _subs: Vec<Subscription>,
+}
+
+/// Where the Settings layout changes, in pixels of row width.
+pub struct Layout;
+impl Layout {
+    /// Below this, a control goes under its title and description.
+    pub const STACK: f32 = 600.;
+    /// The language table needs this much for its five columns.
+    pub const TABLE: f32 = 760.;
 }
 
 impl SettingsForm {
@@ -140,6 +153,7 @@ impl SettingsForm {
             lsp_roots,
             probes: BTreeMap::new(),
             probing: false,
+            content_width: 900.,
             _subs: subs,
         }
     }
@@ -333,15 +347,24 @@ impl KernApp {
             .value()
             .trim()
             .to_string();
-        if pattern.is_empty() || lang::by_id(&id).is_none() {
+        // The id (`csharp`) or the name shown in the list (`C#`), any case.
+        let language = lang::by_id(&id).or_else(|| {
+            LANGUAGES
+                .iter()
+                .find(|l| l.display.eq_ignore_ascii_case(&id) || l.id.eq_ignore_ascii_case(&id))
+                .copied()
+        });
+        let Some(language) = language.filter(|_| !pattern.is_empty()) else {
             self.toast(
-                "Enter a pattern and a language id from the list below",
+                "Enter a file pattern and a language from the list below, by name or id",
                 true,
                 cx,
             );
             return;
-        }
-        self.settings.file_associations.insert(pattern, id);
+        };
+        self.settings
+            .file_associations
+            .insert(pattern, language.id.to_string());
         self.persist();
         cx.notify();
     }
@@ -432,6 +455,40 @@ impl KernApp {
             )
     }
 
+    fn stacked(&self) -> bool {
+        self.settings_form.content_width < Layout::STACK
+    }
+
+    /// A text field's slot: its natural width beside the title, or a share of
+    /// the row once controls go under the description.
+    fn field(&self, width: f32) -> Div {
+        if self.stacked() {
+            div().flex_1().min_w(px(64.))
+        } else {
+            div().w(px(width)).flex_shrink_0()
+        }
+    }
+
+    /// A line of controls; it spans the row when stacked so buttons stay visible.
+    fn controls(&self) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .when(self.stacked(), |d| d.w_full())
+    }
+
+    /// Copies a value that may be longer than its field, such as a path.
+    fn copy_button(
+        &self,
+        id: impl Into<ElementId>,
+        value: String,
+    ) -> gpui_kit::component::button::Button {
+        icon_button(id, "copy", "Copy Full Value").on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(value.clone()))
+        })
+    }
+
     /// A settings row, or nothing when the search query excludes it.
     fn row(
         &self,
@@ -453,11 +510,12 @@ impl KernApp {
             Scope::Global => "Global",
             Scope::Project => "This project",
         };
+        let stacked = self.stacked();
         Some(
             div()
                 .flex()
-                .items_center()
-                .gap_3()
+                .when(stacked, |d| d.flex_col().items_start().gap_2())
+                .when(!stacked, |d| d.items_center().gap_3())
                 .py_2()
                 .border_b_1()
                 .border_color(p.border)
@@ -495,7 +553,11 @@ impl KernApp {
                                 .child(description.to_string()),
                         ),
                 )
-                .child(control)
+                .child(if stacked {
+                    div().w_full().flex().child(control).into_any_element()
+                } else {
+                    control.into_any_element()
+                })
                 .into_any_element(),
         )
     }
@@ -508,7 +570,7 @@ impl KernApp {
             "Font Family",
             "Applied on Enter. Use a monospaced family.",
             Scope::Global,
-            div().w(px(200.)).child(Input::new(&family)),
+            self.field(200.).child(Input::new(&family)),
             cx,
         ));
         let c = self.stepper(
@@ -548,7 +610,7 @@ impl KernApp {
             "Word Wrap",
             &format!(
                 "{}. Off: lines scroll horizontally. On: the number stays on the first visual row.",
-                shortcut("⌥Z")
+                super::keys::WORD_WRAP.label()
             ),
             Scope::Global,
             c,
@@ -616,11 +678,11 @@ impl KernApp {
             .flex()
             .gap_1()
             .child(opt("t-dark", "Graphite", ThemeChoice::Dark, cx))
-            .child(opt("t-light", "Light", ThemeChoice::Light, cx))
+            .child(opt("t-light", "Cream", ThemeChoice::Light, cx))
             .child(opt("t-system", "System", ThemeChoice::System, cx));
         self.row(
             "Theme",
-            "System follows the macOS appearance while KERN is running.",
+            "System follows the light or dark appearance of the OS while KERN is running.",
             Scope::Global,
             control,
             cx,
@@ -637,7 +699,7 @@ impl KernApp {
             "Shell",
             "For new sessions. Applied on Enter.",
             Scope::Global,
-            div().w(px(240.)).child(Input::new(&shell)),
+            self.field(240.).child(Input::new(&shell)),
             cx,
         ));
         let c = self.stepper(
@@ -683,10 +745,11 @@ impl KernApp {
         let has_project = self.project.is_some();
         if has_project {
             let py = self.settings_form.python.clone();
-            let c = div()
-                .flex()
-                .gap_1()
-                .child(div().w(px(240.)).child(Input::new(&py)))
+            let full = py.read(cx).value().to_string();
+            let c = self
+                .controls()
+                .child(self.field(240.).child(Input::new(&py)))
+                .child(self.copy_button("copy-py", full))
                 .child(
                     button("save-py", "Save", p)
                         .on_click(cx.listener(|t, _, _, cx| t.save_python(cx))),
@@ -722,11 +785,10 @@ impl KernApp {
             self.settings_form.assoc_pattern.clone(),
             self.settings_form.assoc_language.clone(),
         );
-        let c = div()
-            .flex()
-            .gap_1()
-            .child(div().w(px(130.)).child(Input::new(&pat)))
-            .child(div().w(px(130.)).child(Input::new(&lang_id)))
+        let c = self
+            .controls()
+            .child(self.field(150.).child(Input::new(&pat)))
+            .child(self.field(150.).child(Input::new(&lang_id)))
             .child(
                 button("add-assoc", "Add", p)
                     .on_click(cx.listener(|t, _, _, cx| t.add_association(cx))),
@@ -752,11 +814,13 @@ impl KernApp {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .h(px(24.))
+                    .min_h(px(24.))
                     .text_size(px(12.))
                     .child(
+                        // Long patterns and language names wrap instead of hiding Remove.
                         div()
                             .flex_1()
+                            .min_w_0()
                             .font_family("Menlo")
                             .child(format!("{k} → {v}")),
                     )
@@ -783,6 +847,9 @@ impl KernApp {
                 .text_color(color)
                 .child(t)
         };
+        // Wide: the five-column table. Narrow: one block per language, so Run and
+        // long install hints never end up past the edge.
+        let table = self.settings_form.content_width >= Layout::TABLE;
         rows.push(
             div()
                 .flex()
@@ -791,11 +858,21 @@ impl KernApp {
                 .pb_1()
                 .border_b_1()
                 .border_color(p.border)
-                .child(cell("Language".into(), 90., p.muted))
-                .child(cell("Files".into(), 170., p.muted))
-                .child(cell("Highlight".into(), 76., p.muted))
-                .child(cell("Language server".into(), 230., p.muted))
-                .child(cell("Run".into(), 150., p.muted))
+                .when(!table, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(p.muted)
+                            .child("Languages: highlighting, language server and Run"),
+                    )
+                })
+                .when(table, |d| d.child(cell("Language".into(), 90., p.muted)))
+                .when(table, |d| {
+                    d.child(cell("Files".into(), 170., p.muted))
+                        .child(cell("Highlight".into(), 76., p.muted))
+                        .child(cell("Language server".into(), 230., p.muted))
+                        .child(cell("Run".into(), 150., p.muted))
+                })
                 .into_any_element(),
         );
         for l in LANGUAGES {
@@ -835,6 +912,64 @@ impl KernApp {
                     }
                 }
             };
+            if !table {
+                let detail = |label: &'static str, value: String, color: Hsla| {
+                    div()
+                        .flex()
+                        .gap_2()
+                        .text_size(px(11.))
+                        .child(
+                            div()
+                                .w(px(104.))
+                                .flex_shrink_0()
+                                .text_color(p.muted)
+                                .child(label),
+                        )
+                        .child(div().flex_1().min_w_0().text_color(color).child(value))
+                };
+                rows.push(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .py_1p5()
+                        .border_b_1()
+                        .border_color(p.border)
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .items_baseline()
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(l.display.to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(p.muted)
+                                        .font_family("Menlo")
+                                        .child(l.id),
+                                ),
+                        )
+                        .child(detail("Files", files.join(" "), p.fg))
+                        .child(detail(
+                            "Highlight",
+                            if l.note.is_empty() {
+                                highlight.to_string()
+                            } else {
+                                format!("{highlight} · {}", l.note)
+                            },
+                            p.fg,
+                        ))
+                        .child(detail("Language server", server, color))
+                        .child(detail("Run", l.run.label().to_string(), p.fg))
+                        .into_any_element(),
+                );
+                continue;
+            }
             rows.push(
                 div()
                     .flex()
@@ -843,7 +978,21 @@ impl KernApp {
                     .py_1()
                     .border_b_1()
                     .border_color(p.border)
-                    .child(cell(l.display.to_string(), 90., p.fg))
+                    .child(
+                        div()
+                            .w(px(90.))
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(px(11.)).child(l.display.to_string()))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(p.muted)
+                                    .font_family("Menlo")
+                                    .child(l.id),
+                            ),
+                    )
                     .child(cell(files.join(" "), 170., p.muted))
                     .child(
                         div()
@@ -878,7 +1027,8 @@ impl KernApp {
             .flex()
             .flex_col()
             .gap_1()
-            .w(px(260.))
+            .when(self.stacked(), |d| d.w_full())
+            .when(!self.stacked(), |d| d.w(px(260.)))
             .child(Input::new(&ln))
             .child(Input::new(&lc))
             .child(Input::new(&la))
@@ -905,7 +1055,7 @@ impl KernApp {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(div().flex_1().text_size(px(12.)).child(format!(
+                    .child(div().flex_1().min_w_0().text_size(px(12.)).child(format!(
                         "{}: {} {} [{}]",
                         c.name,
                         c.command,
@@ -961,6 +1111,7 @@ impl KernApp {
         let p = pal(cx);
         let mut rows: Vec<AnyElement> = vec![];
         let probing = self.settings_form.probing;
+        let stacked = self.stacked();
         let (tn, tp) = (
             self.settings_form.tool_name.clone(),
             self.settings_form.tool_path.clone(),
@@ -971,7 +1122,8 @@ impl KernApp {
                 .items_center()
                 .gap_2()
                 .py_2()
-                .child(div().flex_1().text_size(px(11.)).text_color(p.muted).child("Each tool is actually started with --version. Being on PATH alone is not enough."))
+                .when(stacked, |d| d.flex_col().items_start())
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(p.muted).child("Each tool is actually started with --version. Being on PATH alone is not enough."))
                 .child(button("check-tools", if probing { "Checking…" } else { "Check Again" }, p).on_click(cx.listener(|t, _, _, cx| t.run_tool_probes(cx))))
                 .into_any_element(),
         );
@@ -992,6 +1144,13 @@ impl KernApp {
             } else {
                 hint
             };
+            let found_path = match self.settings_form.probes.get(&name) {
+                Some(Probe::Ready { path, .. }) | Some(Probe::Broken { path, .. }) => {
+                    Some(path.display().to_string())
+                }
+                _ => None,
+            };
+            let name_w = if self.stacked() { 110. } else { 190. };
             let (status, color) = match self.settings_form.probes.get(&name) {
                 None => ("checking…".to_string(), p.muted),
                 Some(Probe::Ready { path, version }) if version.is_empty() => {
@@ -1014,13 +1173,17 @@ impl KernApp {
                     .py_1()
                     .border_b_1()
                     .border_color(p.border)
-                    .child(div().w(px(190.)).flex_shrink_0().text_size(px(12.)).child(
-                        if overrides.contains_key(&name) {
-                            format!("{name} (custom path)")
-                        } else {
-                            name.clone()
-                        },
-                    ))
+                    .child(
+                        div()
+                            .w(px(name_w))
+                            .flex_shrink_0()
+                            .text_size(px(12.))
+                            .child(if overrides.contains_key(&name) {
+                                format!("{name} (custom path)")
+                            } else {
+                                name.clone()
+                            }),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -1029,14 +1192,16 @@ impl KernApp {
                             .text_color(color)
                             .child(status),
                     )
+                    .when_some(found_path, |d, path| {
+                        d.child(self.copy_button(("tool-copy", i), path))
+                    })
                     .into_any_element(),
             );
         }
-        let form = div()
-            .flex()
-            .gap_1()
-            .child(div().w(px(130.)).child(Input::new(&tn)))
-            .child(div().w(px(220.)).child(Input::new(&tp)))
+        let form = self
+            .controls()
+            .child(self.field(130.).child(Input::new(&tn)))
+            .child(self.field(220.).child(Input::new(&tp)))
             .child(
                 button("save-tool", "Apply", p)
                     .on_click(cx.listener(|t, _, _, cx| t.save_tool_path(cx))),
@@ -1053,6 +1218,21 @@ impl KernApp {
 
     pub fn render_settings_tab(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
+        // The tab's real width: the window minus the activity bar and whatever
+        // panels are open beside the editor area.
+        let l = &self.settings.layout;
+        let mut center = l.window_width - 44.;
+        if self.project.is_some() {
+            if l.sidebar_visible {
+                center -= l.sidebar_width + 2.;
+            }
+            if l.codex_visible {
+                center -= l.codex_width + 2.;
+            }
+        }
+        let categories_w = if center < 560. { 112. } else { 150. };
+        // Category list, its border, the body's padding and a scrollbar.
+        self.settings_form.content_width = (center - categories_w - 1. - 40. - 8.).max(160.);
         let query_empty = self.settings_form.query.read(cx).value().is_empty();
         let current = self.settings_form.category;
         // A search spans all categories; otherwise only the selected one is shown.
@@ -1115,7 +1295,7 @@ impl KernApp {
                     .flex()
                     .child(
                         div()
-                            .w(px(150.))
+                            .w(px(categories_w))
                             .flex_shrink_0()
                             .py_2()
                             .border_r_1()

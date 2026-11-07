@@ -15,7 +15,8 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 Copy-Item "target\x86_64-pc-windows-msvc\release\kern.exe" "$out\KERN.exe" -Force
 Copy-Item "README.md" "$out\README.md" -Force
 
-$zip = "dist\windows\KERN-$version-x64-portable.zip"
+# Release file names: the update check (src/core/update.rs) looks for exactly these.
+$zip = "dist\windows\KERN-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path "$out\*" -DestinationPath $zip
 Write-Host "Portable: $zip"
@@ -28,7 +29,7 @@ $iscc = @(
 if ($iscc) {
     & $iscc "/DAppVersion=$version" "installer\KERN.iss"
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
-    Write-Host "Installer: dist\windows\KERN-$version-x64-setup.exe"
+    Write-Host "Installer: dist\windows\KERN-windows-x64-setup.exe"
 } else {
     Write-Host "Inno Setup 6 not found: installer skipped (winget install JRSoftware.InnoSetup)."
 }

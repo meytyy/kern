@@ -357,10 +357,13 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
                 "shell" => {
                     let script = arg.clone();
                     cx.background_spawn(async move {
+                        // cmd parses its own command line: pass it as written, or
+                        // Rust's quoting of embedded quotes garbles the paths.
                         #[cfg(windows)]
                         let mut command = {
+                            use std::os::windows::process::CommandExt;
                             let mut c = std::process::Command::new("cmd");
-                            c.arg("/C");
+                            c.raw_arg("/C").raw_arg(&script);
                             c
                         };
                         #[cfg(not(windows))]
@@ -369,7 +372,9 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
                             c.arg("-c");
                             c
                         };
-                        let out = command.arg(&script).output().map_err(|e| e.to_string())?;
+                        #[cfg(not(windows))]
+                        command.arg(&script);
+                        let out = command.output().map_err(|e| e.to_string())?;
                         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                         if out.status.success() {
                             Ok(text)

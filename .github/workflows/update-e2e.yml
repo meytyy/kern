@@ -221,6 +221,7 @@ jobs:
           if (-not (Test-Path "$env:KERN_CONFIG_DIR\settings.json")) { throw "settings lost" }
 
       - name: Recycle Bin has the items, and one comes back
+        if: always()
         run: |
           $bin = (New-Object -ComObject Shell.Application).NameSpace(10)
           $names = @($bin.Items() | ForEach-Object { $_.Name })

@@ -1,0 +1,46 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
+          rustup default stable
+          rustc --version
+
+      - name: Inno Setup
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build (release, installer and portable zip)
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+
+      - name: Start KERN.exe for 20 seconds
+        run: |
+          $p = Start-Process -FilePath "dist\windows\KERN\KERN.exe" -PassThru
+          Start-Sleep -Seconds 20
+          $p.Refresh()
+          if ($p.HasExited) { throw "KERN.exe exited with code $($p.ExitCode)" }
+          Write-Host "KERN.exe is running (pid $($p.Id))"
+          Stop-Process -Id $p.Id -Force
+
+      - name: Tests
+        continue-on-error: true
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kern-windows-x64
+          path: |
+            dist/windows/*-setup.exe
+            dist/windows/*-portable.zip
+          if-no-files-found: error

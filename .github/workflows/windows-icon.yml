@@ -62,9 +62,14 @@ jobs:
             $g.Dispose(); $bmp.Dispose()
           }
           function Shortcut-Icon([string]$name) {
-            $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'KERN.lnk'
+            # An installer run as administrator puts it on the common (Public) desktop.
+            $lnk = @(
+              (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KERN.lnk'),
+              (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'KERN.lnk')
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $lnk) { "$name shortcut: not found" | Tee-Object -Append shots\shortcut.txt; return }
             $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-            "$name shortcut: target=$($sh.TargetPath) icon=$($sh.IconLocation)" | Tee-Object -Append shots\shortcut.txt
+            "$name shortcut: $lnk target=$($sh.TargetPath) icon=$($sh.IconLocation)" | Tee-Object -Append shots\shortcut.txt
             [System.Drawing.Icon]::ExtractAssociatedIcon($lnk).ToBitmap().Save("shots\$name-shortcut-icon.png")
           }
           function Minimize-All { (New-Object -ComObject Shell.Application).MinimizeAll(); Start-Sleep 2 }

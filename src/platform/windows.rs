@@ -332,9 +332,11 @@ mod tests {
         assert!(!folder.exists());
 
         // It is in the Recycle Bin and comes back with Restore.
+        // Explorer hides known extensions in the Recycle Bin's names.
+        let stem = name.trim_end_matches(".txt");
         let script = format!(
             "$bin = (New-Object -ComObject Shell.Application).NameSpace(10); \
-             $item = $bin.Items() | Where-Object {{ $_.Name -eq '{name}' }} | Select-Object -First 1; \
+             $item = $bin.Items() | Where-Object {{ $_.Name -eq '{name}' -or $_.Name -eq '{stem}' }} | Select-Object -First 1; \
              if (-not $item) {{ exit 3 }}; $item.InvokeVerb('undelete'); Start-Sleep 2"
         );
         let status = std::process::Command::new("powershell")

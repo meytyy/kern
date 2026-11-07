@@ -4,7 +4,10 @@
 //!   cargo run --example kern_update_key -- keygen <key-file>
 //!   cargo run --example kern_update_key -- pubkey <key-file>
 //!   cargo run --example kern_update_key -- sign <key-file> <version> <package>...
-use kern::core::update_sign::{hex, public_key_of, sign, unhex};
+//!   cargo run --example kern_update_key -- verify <package>   (with <package>.sig)
+use kern::core::update_sign::{
+    PUBLIC_KEY_HEX, check_package, hex, public_key_of, sign, unhex, verify,
+};
 use std::path::Path;
 
 fn read_key(path: &str) -> [u8; 32] {
@@ -46,6 +49,19 @@ fn main() {
                 println!("{out}");
             }
         }
-        _ => eprintln!("usage: keygen <key> | pubkey <key> | sign <key> <version> <package>..."),
+        Some("verify") => {
+            // What KERN does before installing: the embedded release key, then the bytes.
+            let pkg = Path::new(&args[1]);
+            let text = std::fs::read_to_string(format!("{}.sig", args[1])).expect("read .sig");
+            let m = verify(&text, PUBLIC_KEY_HEX).expect("signature");
+            check_package(pkg, &m, None).expect("package");
+            println!(
+                "ok: {} {} {} bytes sha256 {}",
+                m.file, m.version, m.size, m.sha256
+            );
+        }
+        _ => eprintln!(
+            "usage: keygen <key> | pubkey <key> | sign <key> <version> <package>... | verify <package>"
+        ),
     }
 }

@@ -315,10 +315,12 @@ mod tests {
             "dot.",
             "dir /x",
             "tab\tname",
-            "back\\slash",
         ] {
             assert!(validate_name(bad).is_err(), "{bad:?}");
         }
+        // `\` separates folders on Windows; elsewhere it would make a file name
+        // that Windows cannot open.
+        assert_eq!(validate_name("back\\slash").is_ok(), cfg!(windows));
     }
 
     #[test]

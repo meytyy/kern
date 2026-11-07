@@ -1,12 +1,12 @@
 # KERN
 
-Нативная IDE на Rust: редактор кода, поиск, терминал, запуск проектов, Git, GitHub, чат с Codex в правой панели, официальный Claude Code во вкладке терминала. Без Electron, WebView и HTML-интерфейса. Платформы: macOS на Apple Silicon (arm64) и Windows 11 x64. Версия 0.1.0.
+Нативная IDE на Rust: редактор кода, поиск, терминал, запуск проектов, Git, GitHub, чат с Codex в правой панели, официальный Claude Code во вкладке терминала. Без Electron, WebView и HTML-интерфейса. Платформы: macOS на Apple Silicon (arm64) и Windows 11 x64. Версия 0.1.1.
 
 ## Download
 
-**[Download for Windows (x64)](https://github.com/meytyy/kern/releases/download/v0.1.0/KERN-windows-x64-setup.exe)** · **[Download for macOS (Apple Silicon)](https://github.com/meytyy/kern/releases/download/v0.1.0/KERN-macos-arm64.zip)**
+**[Download for Windows (x64)](https://github.com/meytyy/kern/releases/download/v0.1.1/KERN-windows-x64-setup.exe)** · **[Download for macOS (Apple Silicon)](https://github.com/meytyy/kern/releases/download/v0.1.1/KERN-macos-arm64.zip)**
 
-Version 0.1.0. Both builds are unsigned: Windows SmartScreen and macOS Gatekeeper ask before the first start. On macOS, open KERN.app from the context menu (Open) or allow it in System Settings → Privacy & Security.
+Version 0.1.1. Both builds are unsigned: Windows SmartScreen and macOS Gatekeeper ask before the first start. On macOS, open KERN.app from the context menu (Open) or allow it in System Settings → Privacy & Security.
 
 Редактор, поиск, терминал и локальный Git работают без аккаунта и независимо от агентов.
 

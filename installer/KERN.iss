@@ -2,7 +2,7 @@
 ;   iscc installer\KERN.iss            (after scripts\build-windows.ps1)
 ; Settings and chat history live in %APPDATA%\kern and are kept on update and uninstall.
 
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.1"
 
 [Setup]
 AppId={{7C1B2E4A-5F0D-4C8E-9C3B-2A1E6D8F4B10}

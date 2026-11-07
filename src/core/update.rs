@@ -376,4 +376,41 @@ mod tests {
         );
         assert!(evaluate("<html>", &v("0.1.0"), "macos", "aarch64").is_err());
     }
+
+    /// The app, the Windows installer and the exe's version resource carry one
+    /// version, which is also the release tag (vX.Y.Z).
+    #[test]
+    fn version_agrees_everywhere() {
+        let v = env!("CARGO_PKG_VERSION");
+        let iss = include_str!("../../installer/KERN.iss");
+        assert!(
+            iss.contains(&format!("#define AppVersion \"{v}\"")),
+            "installer/KERN.iss"
+        );
+        let rc = include_str!("../../assets/windows/kern.rc");
+        let commas = format!("{},0", v.replace('.', ","));
+        assert!(
+            rc.contains(&format!("FILEVERSION {commas}")),
+            "kern.rc FILEVERSION"
+        );
+        assert!(
+            rc.contains(&format!("PRODUCTVERSION {commas}")),
+            "kern.rc PRODUCTVERSION"
+        );
+        assert!(
+            rc.contains(&format!("\"ProductVersion\", \"{v}\"")),
+            "kern.rc ProductVersion"
+        );
+        let readme = include_str!("../../README.md");
+        for file in ["KERN-windows-x64-setup.exe", "KERN-macos-arm64.zip"] {
+            let link = format!("https://github.com/meytyy/kern/releases/download/v{v}/{file}");
+            assert!(readme.contains(&link), "README link {link}");
+        }
+        // The README links are the files the update check looks for.
+        assert_eq!(
+            asset_names("windows", "x86_64")[0],
+            "KERN-windows-x64-setup.exe"
+        );
+        assert_eq!(asset_names("macos", "aarch64")[0], "KERN-macos-arm64.zip");
+    }
 }

@@ -34,9 +34,12 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\dist\windows\KERN\KERN.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-; The icon comes from KERN.exe itself (resource 1, assets/windows/kern.ico).
-Name: "{autoprograms}\KERN"; Filename: "{app}\KERN.exe"; IconFilename: "{app}\KERN.exe"; IconIndex: 0
-Name: "{autodesktop}\KERN"; Filename: "{app}\KERN.exe"; IconFilename: "{app}\KERN.exe"; IconIndex: 0; Tasks: desktopicon
+; The icon comes from KERN.exe itself: resource ID 1 (assets/windows/kern.rc), named
+; as -1. Explorer caches icons by "path,index"; v0.1.0 shortcuts used "KERN.exe,0",
+; so naming the resource ID gives a new key and Explorer reads the new icon after an
+; update instead of the cached old one. It is the same icon as index 0.
+Name: "{autoprograms}\KERN"; Filename: "{app}\KERN.exe"; IconFilename: "{app}\KERN.exe"; IconIndex: -1
+Name: "{autodesktop}\KERN"; Filename: "{app}\KERN.exe"; IconFilename: "{app}\KERN.exe"; IconIndex: -1; Tasks: desktopicon
 
 [Run]
 ; After an update over an older KERN, Explorer may keep the previous icon for the

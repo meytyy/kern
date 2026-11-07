@@ -20,6 +20,9 @@ OutputDir=..\dist\windows
 OutputBaseFilename=KERN-windows-x64-setup
 SetupIconFile=..\assets\windows\kern.ico
 UninstallDisplayIcon={app}\KERN.exe
+; Makes Explorer reload icons when setup finishes (SHCNE_ASSOCCHANGED). Without it
+; an update keeps showing the previous icon cached for the same KERN.exe path.
+ChangesAssociations=yes
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -40,3 +43,19 @@ Name: "{autodesktop}\KERN"; Filename: "{app}\KERN.exe"; IconFilename: "{app}\KER
 ; same path in its icon cache: this asks it to reload icons.
 Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Flags: runhidden skipifdoesntexist
 Filename: "{app}\KERN.exe"; Description: "{cm:LaunchProgram,KERN}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Tells Explorer that these files changed, so it redraws their icons from the
+// new KERN.exe instead of its cache (SHCNE_UPDATEITEM, SHCNF_PATHW).
+procedure SHChangeNotify(EventId: Integer; Flags: Cardinal; Item1, Item2: String);
+  external 'SHChangeNotify@shell32.dll stdcall';
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    SHChangeNotify($2000, $0005, ExpandConstant('{app}\KERN.exe'), '');
+    SHChangeNotify($2000, $0005, ExpandConstant('{autodesktop}\KERN.lnk'), '');
+    SHChangeNotify($2000, $0005, ExpandConstant('{autoprograms}\KERN.lnk'), '');
+  end;
+end;

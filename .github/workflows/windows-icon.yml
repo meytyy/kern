@@ -107,6 +107,14 @@ jobs:
           Set-Desktop dark; Shot 'clean-desktop-dark'
           Shortcut-Icon 'clean'
 
+      - name: Diagnostic - after an Explorer restart
+        run: |
+          . .\shots\helpers.ps1
+          # Not part of what a user sees after setup: only shows whether anything
+          # still differs once Explorer has rebuilt its view.
+          Stop-Process -Name explorer -Force; Start-Sleep 6
+          Minimize-All; Set-Desktop light; Shot 'diag-explorer-restarted-light'
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:

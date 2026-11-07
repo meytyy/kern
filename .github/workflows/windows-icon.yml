@@ -1,8 +1,9 @@
 name: Windows icon check
 
-# Builds the installer, installs KERN the way a user would (over the previous
-# release, and clean), and records how Windows shows the icon: the desktop
-# shortcut on a light and a dark desktop, Explorer, and the taskbar.
+# Builds the installer once, then installs KERN the way users do on two fresh
+# Windows machines: a clean install (KERN never installed there) and an update
+# over the previous release. Records the desktop shortcut on a light and a dark
+# desktop, Explorer and the taskbar, and the icon Windows resolves for the shortcut.
 on:
   workflow_dispatch:
   # A manual run needs the file on the default branch; this branch runs it on push.
@@ -10,26 +11,39 @@ on:
     branches: [windows-icon]
 
 jobs:
-  icon:
+  build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
           rustup default stable
-
       - name: Inno Setup
         run: |
           if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
             choco install innosetup -y --no-progress
           }
-
       - name: Build (release and installer)
         run: powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: dist/windows/KERN-windows-x64-setup.exe
 
+  install:
+    needs: build
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [clean, update]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer
       - name: Screenshot helpers
+        shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path shots | Out-Null
           @'
@@ -50,10 +64,15 @@ jobs:
             Set-ItemProperty $k SystemUsesLightTheme $light
             $rgb = if ($light) { 0xF3F3F3 } else { 0x202020 }
             [Desk]::SetSysColors(1, @(1), @($rgb)) | Out-Null
-            [Desk]::SystemParametersInfo(0x14, 0, "", 3) | Out-Null   # no wallpaper
+            [Desk]::SystemParametersInfo(0x14, 0, "", 3) | Out-Null
             Start-Sleep 2
           }
+          function Close-Dialogs {
+            # The runner shows a "temporary paging file" notice at boot.
+            Get-Process | Where-Object { $_.MainWindowTitle -eq 'System Properties' } | Stop-Process -Force -ErrorAction SilentlyContinue
+          }
           function Shot([string]$name) {
+            Close-Dialogs
             $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
             $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
             $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -62,7 +81,6 @@ jobs:
             $g.Dispose(); $bmp.Dispose()
           }
           function Shortcut-Icon([string]$name) {
-            # An installer run as administrator puts it on the common (Public) desktop.
             $lnk = @(
               (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KERN.lnk'),
               (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'KERN.lnk')
@@ -73,53 +91,54 @@ jobs:
             [System.Drawing.Icon]::ExtractAssociatedIcon($lnk).ToBitmap().Save("shots\$name-shortcut-icon.png")
           }
           function Minimize-All { (New-Object -ComObject Shell.Application).MinimizeAll(); Start-Sleep 2 }
+          function Install([string]$setup) {
+            Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -Wait
+            Start-Sleep 4
+          }
           '@ | Set-Content shots\helpers.ps1
 
-      - name: Install v0.1.0, then this build over it
+      - name: Previous release first (update only)
+        if: matrix.scenario == 'update'
+        shell: powershell
         run: |
           . .\shots\helpers.ps1
           Invoke-WebRequest https://github.com/meytyy/kern/releases/download/v0.1.0/KERN-windows-x64-setup.exe -OutFile old-setup.exe
-          Start-Process old-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -Wait
-          Minimize-All; Set-Desktop light; Shot 'old-desktop-light'; Shortcut-Icon 'old'
-          Start-Process dist\windows\KERN-windows-x64-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -Wait
+          Install old-setup.exe
+          Minimize-All; Set-Desktop light; Shot 'before-update-desktop-light'; Shortcut-Icon 'before-update'
+
+      - name: Install this build
+        shell: powershell
+        run: |
+          . .\shots\helpers.ps1
+          Install KERN-windows-x64-setup.exe
           Minimize-All
-          Set-Desktop light; Shot 'update-desktop-light'
-          Set-Desktop dark; Shot 'update-desktop-dark'
-          Shortcut-Icon 'update'
+          Set-Desktop light; Shot '${{ matrix.scenario }}-desktop-light'
+          Set-Desktop dark; Shot '${{ matrix.scenario }}-desktop-dark'
+          Shortcut-Icon '${{ matrix.scenario }}'
 
       - name: Explorer and taskbar
+        shell: powershell
         run: |
           . .\shots\helpers.ps1
+          Set-Desktop light
           $app = Join-Path $env:ProgramFiles 'KERN'
-          Start-Process explorer.exe $app; Start-Sleep 4; Shot 'explorer'
-          $p = Start-Process (Join-Path $app 'KERN.exe') -PassThru; Start-Sleep 8; Shot 'taskbar-running'
+          Start-Process explorer.exe $app; Start-Sleep 4; Shot '${{ matrix.scenario }}-explorer'
+          $p = Start-Process (Join-Path $app 'KERN.exe') -PassThru; Start-Sleep 8; Shot '${{ matrix.scenario }}-taskbar'
           Stop-Process -Id $p.Id -Force
 
-      - name: Clean install
+      - name: Diagnostic - icon cache cleared (update only)
+        if: matrix.scenario == 'update'
+        shell: powershell
         run: |
           . .\shots\helpers.ps1
-          $un = Join-Path $env:ProgramFiles 'KERN\unins000.exe'
-          Start-Process $un -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
-          Start-Sleep 3
-          Start-Process dist\windows\KERN-windows-x64-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/TASKS=desktopicon' -Wait
-          Minimize-All
-          Set-Desktop light; Shot 'clean-desktop-light'
-          Set-Desktop dark; Shot 'clean-desktop-dark'
-          Shortcut-Icon 'clean'
-
-      - name: Diagnostic - after an Explorer restart
-        run: |
-          . .\shots\helpers.ps1
-          # Not part of what a user sees after setup: only shows whether anything
-          # still differs once Explorer has rebuilt its view.
-          Stop-Process -Name explorer -Force; Start-Sleep 6
-          Minimize-All; Set-Desktop light; Shot 'diag-explorer-restarted-light'
+          Stop-Process -Name explorer -Force; Start-Sleep 2
+          Remove-Item "$env:LOCALAPPDATA\IconCache.db" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\iconcache_*.db" -Force -ErrorAction SilentlyContinue
+          Start-Process explorer.exe; Start-Sleep 8
+          Minimize-All; Set-Desktop light; Shot 'update-cache-cleared-desktop-light'
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-icon-shots
-          path: |
-            shots/*.png
-            shots/shortcut.txt
-            dist/windows/KERN-windows-x64-setup.exe
+          name: shots-${{ matrix.scenario }}
+          path: shots/

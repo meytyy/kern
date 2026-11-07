@@ -2,7 +2,7 @@
 ;   iscc installer\KERN.iss            (after scripts\build-windows.ps1)
 ; Settings and chat history live in %APPDATA%\kern and are kept on update and uninstall.
 
-#define AppVersion "0.1.2"
+#define AppVersion "0.1.3"
 
 [Setup]
 AppId={{7C1B2E4A-5F0D-4C8E-9C3B-2A1E6D8F4B10}
@@ -46,12 +46,38 @@ Name: "{autodesktop}\KERN"; Filename: "{app}\KERN.exe"; IconFilename: "{app}\KER
 ; same path in its icon cache: this asks it to reload icons.
 Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Flags: runhidden skipifdoesntexist
 Filename: "{app}\KERN.exe"; Description: "{cm:LaunchProgram,KERN}"; Flags: nowait postinstall skipifsilent
+; An in-app update runs this installer silently: KERN starts again on the new version.
+Filename: "{app}\KERN.exe"; Flags: nowait runasoriginaluser; Check: IsKernUpdate
 
 [Code]
 // Tells Explorer that these files changed, so it redraws their icons from the
 // new KERN.exe instead of its cache (SHCNE_UPDATEITEM, SHCNF_PATHW).
 procedure SHChangeNotify(EventId: Integer; Flags: Cardinal; Item1, Item2: String);
   external 'SHChangeNotify@shell32.dll stdcall';
+
+// Started by KERN with /KERNUPDATE=1 (Help > Check for Updates > Restart to Update).
+function IsKernUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:KERNUPDATE|0}') = '1';
+end;
+
+// KERN holds the "KernAppRunning" mutex until it has quit. An update waits for
+// that (up to a minute) before replacing files.
+function InitializeSetup: Boolean;
+var
+  Waited: Integer;
+begin
+  Result := True;
+  if IsKernUpdate then
+  begin
+    Waited := 0;
+    while CheckForMutexes('KernAppRunning') and (Waited < 600) do
+    begin
+      Sleep(100);
+      Waited := Waited + 1;
+    end;
+  end;
+end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin

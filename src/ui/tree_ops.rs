@@ -22,6 +22,8 @@ pub struct InlineEdit {
     /// Shown in the row under the field; the typed name stays for fixing.
     pub error: Option<String>,
     error_value: String,
+    /// Set once the field has had the focus; losing it afterwards cancels.
+    pub had_focus: bool,
     _sub: Subscription,
 }
 
@@ -65,8 +67,20 @@ impl KernApp {
         let sub = cx.subscribe_in(
             &input,
             window,
-            |this: &mut KernApp, _, ev: &InputEvent, w, cx| match ev {
+            |this: &mut KernApp, input, ev: &InputEvent, w, cx| match ev {
                 InputEvent::PressEnter { .. } => this.commit_tree_edit(w, cx),
+                // Clicking anywhere else (the editor, another row, another app)
+                // drops the unconfirmed name: nothing was created yet.
+                InputEvent::Blur => {
+                    if this
+                        .project
+                        .as_ref()
+                        .and_then(|p| p.tree.edit.as_ref())
+                        .is_some_and(|e| &e.input == input)
+                    {
+                        this.drop_tree_edit(cx);
+                    }
+                }
                 InputEvent::Change => {
                     // Only a real edit of the rejected name clears its message.
                     if let Some(p) = &mut this.project
@@ -122,6 +136,7 @@ impl KernApp {
                 input,
                 error: None,
                 error_value: String::new(),
+                had_focus: false,
                 _sub: sub,
             });
             p.tree.reveal_edit = true;
@@ -159,6 +174,7 @@ impl KernApp {
                 input,
                 error: None,
                 error_value: String::new(),
+                had_focus: false,
                 _sub: sub,
             });
             p.tree.reveal_edit = true;
@@ -167,13 +183,23 @@ impl KernApp {
         cx.notify();
     }
 
+    /// Esc, or Enter with no name: the row goes and the tree keeps the focus.
     pub fn cancel_tree_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(p) = &mut self.project
-            && p.tree.edit.take().is_some()
-        {
+        if self.drop_tree_edit(cx) {
             window.focus(&self.tree_focus, cx);
+        }
+    }
+
+    /// Removes the name field without touching the focus (it went elsewhere).
+    pub fn drop_tree_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let dropped = self
+            .project
+            .as_mut()
+            .is_some_and(|p| p.tree.edit.take().is_some());
+        if dropped {
             cx.notify();
         }
+        dropped
     }
 
     /// Enter in the name field.

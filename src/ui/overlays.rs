@@ -31,6 +31,9 @@ pub enum ConfirmAction {
         path: std::path::PathBuf,
         save_first: bool,
     },
+    /// Restart to Update with unsaved files.
+    SaveAllAndUpdate,
+    DiscardAndUpdate,
 }
 
 #[derive(Clone)]
@@ -702,6 +705,12 @@ impl KernApp {
                 self.force_extension_off(&id, uninstall, window, cx)
             }
             ConfirmAction::Trash { path, save_first } => self.trash_now(path, save_first, cx),
+            ConfirmAction::SaveAllAndUpdate => {
+                if self.save_all(cx) {
+                    self.apply_update(cx);
+                }
+            }
+            ConfirmAction::DiscardAndUpdate => self.apply_update(cx),
             ConfirmAction::DiscardAndQuit => {
                 self.shutdown_processes();
                 self.persist();

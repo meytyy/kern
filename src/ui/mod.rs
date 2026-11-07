@@ -57,6 +57,10 @@ gpui_kit::actions!(
         NewFolder,
         KillTerminal,
         CheckForUpdates,
+        DownloadUpdate,
+        RestartToUpdate,
+        DownloadLatestRelease,
+        AboutKern,
         GoToDefinitionHere,
         OpenSettings,
         ToggleWordWrap,
@@ -204,7 +208,12 @@ fn menu_list() -> Vec<Menu> {
         ),
         menu(
             "Help",
-            vec![MenuItem::action("Check for Updates…", CheckForUpdates)],
+            vec![
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::action("Download Latest Release…", DownloadLatestRelease),
+                MenuItem::separator(),
+                MenuItem::action("About KERN", AboutKern),
+            ],
         ),
     ]
 }
@@ -225,6 +234,7 @@ pub fn in_window_menu() -> bool {
 
 /// Application entry point.
 pub fn run() {
+    crate::platform::mark_running();
     let settings = Settings::load();
     crate::platform::tools::set_overrides(settings.tool_paths.clone());
     let shell = settings.shell.clone();

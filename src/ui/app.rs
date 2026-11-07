@@ -260,7 +260,9 @@ impl KernApp {
 
     /// Open a folder in this window, after dealing with unsaved work.
     pub fn open_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let root = std::fs::canonicalize(&path).unwrap_or(path);
+        // Plain, not verbatim, on Windows: the Recycle Bin, Explorer and the file
+        // watcher all use plain paths.
+        let root = crate::platform::simplify_path(&std::fs::canonicalize(&path).unwrap_or(path));
         self.shutdown_processes();
         self.persist();
         self.settings.add_recent(&root);
@@ -354,6 +356,9 @@ impl KernApp {
                 self.open_file_async(file, activate, None, window, cx);
             }
         }
+        // The previous project's editors are gone with it: without a focused
+        // element shortcuts and menu actions would have nowhere to go.
+        window.focus(&self.focus, cx);
         self.persist();
         cx.notify();
     }
@@ -1139,6 +1144,21 @@ impl Render for KernApp {
                 }
             });
         }
+        // The Explorer's name field goes when the Explorer closes or gives way to
+        // another view, and when the focus leaves it (a click in the editor or
+        // elsewhere): nothing was created, so nothing is left behind.
+        let field_left = match self.project.as_mut().and_then(|p| p.tree.edit.as_mut()) {
+            Some(e) => {
+                let focused = e.input.read(cx).focus_handle(cx).is_focused(window);
+                let left = e.had_focus && !focused;
+                e.had_focus |= focused;
+                left
+            }
+            None => false,
+        };
+        if field_left || !self.settings.layout.sidebar_visible || self.side != SideView::Files {
+            self.drop_tree_edit(cx);
+        }
         let top = self.render_topbar(window, cx).into_any_element();
         let body = if self.project.is_some() {
             self.render_workspace(window, cx).into_any_element()
@@ -1247,6 +1267,12 @@ impl Render for KernApp {
             .on_action(
                 cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(true, cx)),
             )
+            .on_action(cx.listener(|this, _: &DownloadUpdate, _, cx| this.download_update(cx)))
+            .on_action(cx.listener(|this, _: &RestartToUpdate, _, cx| this.restart_to_update(cx)))
+            .on_action(cx.listener(|this, _: &DownloadLatestRelease, _, cx| {
+                this.download_latest_manually(cx)
+            }))
+            .on_action(cx.listener(|this, _: &AboutKern, _, cx| this.show_about(cx)))
             .on_action(
                 cx.listener(|this, _: &GoToDefinitionHere, w, cx| this.go_to_definition(w, cx)),
             )

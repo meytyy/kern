@@ -37,6 +37,18 @@ impl gpui_kit::component::input::CompletionProvider for FakeCompletions {
 
 fn log(s: &str) {
     println!("[autotest] {s}");
+    // KERN_AUTOTEST_LOG: also a file, for runs whose output nobody captures
+    // (a KERN started again by the update installer).
+    if let Some(path) = std::env::var_os("KERN_AUTOTEST_LOG") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "[autotest {}] {s}", env!("CARGO_PKG_VERSION"));
+        }
+    }
 }
 
 pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
@@ -48,6 +60,7 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
         std::env::var_os("KERN_CONFIG_DIR").is_some(),
         "KERN_AUTOTEST needs KERN_CONFIG_DIR"
     );
+    #[cfg(target_os = "macos")]
     if std::env::var_os("KERN_AUTOTEST_FLOAT").is_some() {
         float_test_window();
     }
@@ -64,6 +77,18 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
             .timer(Duration::from_millis(800))
             .await;
         for line in lines {
+            // `onversion 0.1.4 <step>`: the step runs only in that version, so one
+            // script can drive KERN before and after an in-app update.
+            let line = match line.strip_prefix("onversion ") {
+                Some(rest) => {
+                    let (v, step) = rest.split_once(' ').unwrap_or((rest, ""));
+                    if v != env!("CARGO_PKG_VERSION") {
+                        continue;
+                    }
+                    step.to_string()
+                }
+                None => line,
+            };
             let (cmd, arg) = line.split_once(' ').unwrap_or((line.as_str(), ""));
             let (cmd, arg) = (cmd.to_string(), arg.to_string());
             let started = Instant::now();
@@ -273,6 +298,10 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
                         "NewFolder" => Some(Box::new(NewFolder)),
                         "CheckForUpdates" => Some(Box::new(CheckForUpdates)),
                         "ToggleBottom" => Some(Box::new(ToggleBottom)),
+                        "ToggleSidebar" => Some(Box::new(ToggleSidebar)),
+                        "DownloadUpdate" => Some(Box::new(DownloadUpdate)),
+                        "RestartToUpdate" => Some(Box::new(RestartToUpdate)),
+                        "AboutKern" => Some(Box::new(AboutKern)),
                         _ => None,
                     };
                     match action {
@@ -328,11 +357,19 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
                 "shell" => {
                     let script = arg.clone();
                     cx.background_spawn(async move {
-                        let out = std::process::Command::new("/bin/sh")
-                            .arg("-c")
-                            .arg(&script)
-                            .output()
-                            .map_err(|e| e.to_string())?;
+                        #[cfg(windows)]
+                        let mut command = {
+                            let mut c = std::process::Command::new("cmd");
+                            c.arg("/C");
+                            c
+                        };
+                        #[cfg(not(windows))]
+                        let mut command = {
+                            let mut c = std::process::Command::new("/bin/sh");
+                            c.arg("-c");
+                            c
+                        };
+                        let out = command.arg(&script).output().map_err(|e| e.to_string())?;
                         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                         if out.status.success() {
                             Ok(text)
@@ -369,6 +406,7 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
 /// macOS stops redrawing a window that other windows cover completely, and clicks
 /// then hit a stale frame. Keeps the test window above others without activating
 /// it: the keyboard stays with whatever the person at the Mac is using.
+#[cfg(target_os = "macos")]
 fn float_test_window() {
     use objc2::msg_send;
     use objc2::rc::Retained;
@@ -388,6 +426,12 @@ fn float_test_window() {
 }
 
 /// Works on the real AppKit window and its standard buttons.
+#[cfg(not(target_os = "macos"))]
+fn native_window_check(_arg: &str) -> Result<String, String> {
+    Err("native window checks are macOS-only".into())
+}
+
+#[cfg(target_os = "macos")]
 fn native_window_check(arg: &str) -> Result<String, String> {
     use objc2::Encode;
     use objc2::msg_send;
@@ -1031,7 +1075,7 @@ impl KernApp {
                 self.settings.layout.codex_visible = arg.contains("codex");
             }
             "updatebg" => self.check_for_updates(false, cx),
-            "updatelater" => self.updates.notice = None,
+            "updatelater" => self.updates.visible = false,
             "selectpath" => {
                 let p = self.project.as_mut().ok_or("no project")?;
                 p.tree.selected = if arg.is_empty() {
@@ -1353,7 +1397,12 @@ impl KernApp {
                 )
             }
             "updatenotice" => {
-                let n = self.updates.notice.as_ref().map(|n| n.version.clone());
+                let n = self
+                    .updates
+                    .offer
+                    .as_ref()
+                    .filter(|_| self.updates.visible)
+                    .map(|n| n.version.clone());
                 let good = if arg == "none" {
                     n.is_none()
                 } else {
@@ -1362,13 +1411,37 @@ impl KernApp {
                 ok(good, format!("notice={n:?}"))
             }
             "updateurl" => {
-                let n = self.updates.notice.as_ref().map(|n| n.download_url.clone());
+                let n = self.updates.offer.as_ref().map(|n| n.download_url.clone());
                 ok(
                     n.as_deref().is_some_and(|u| u.ends_with(arg)),
                     format!("url={n:?}"),
                 )
             }
             "updateidle" => ok(!self.updates.checking, "still checking".into()),
+            "updatephase" => {
+                use super::updates::Phase;
+                let phase = self.updates.phase.clone();
+                let (name, text) = arg.split_once(' ').unwrap_or((arg, ""));
+                let good = match (&phase, name) {
+                    (Phase::Offer, "offer") => true,
+                    (Phase::Downloading { .. }, "downloading") => true,
+                    (Phase::Ready(_), "ready") => true,
+                    (Phase::Failed(e), "failed") => e.contains(text),
+                    _ => false,
+                };
+                ok(good, format!("{phase:?}"))
+            }
+            "version" => ok(
+                env!("CARGO_PKG_VERSION") == arg,
+                env!("CARGO_PKG_VERSION").into(),
+            ),
+            "about" => match &self.overlay {
+                Some(super::overlays::Overlay::Confirm { title, body, .. }) => {
+                    let s = format!("{title}: {body}");
+                    ok(title == "About KERN" && body.contains(arg), s)
+                }
+                _ => Err("About is not open".into()),
+            },
             "termtitle" => {
                 let t = self.at_terminal()?;
                 let title = t.read(cx).title.clone();

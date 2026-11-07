@@ -131,6 +131,22 @@ struct ApiRelease {
 struct ApiAsset {
     name: String,
     browser_download_url: String,
+    #[serde(default)]
+    size: u64,
+    /// `sha256:<hex>`, reported by GitHub for release assets.
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+/// The release file for this platform and what is needed to check it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Package {
+    pub file: String,
+    pub size: u64,
+    /// GitHub's SHA-256 of the file, when it reports one.
+    pub sha256: Option<String>,
+    /// `<file>.sig` in the same release: the signed manifest.
+    pub signature_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +156,7 @@ pub enum Outcome {
         version: Version,
         download_url: String,
         page_url: String,
+        package: Package,
     },
     /// Newer stable release, but no file for this platform.
     NoBuild {
@@ -182,11 +199,29 @@ pub fn evaluate(json: &str, current: &Version, os: &str, arch: &str) -> Result<O
         .iter()
         .find_map(|name| release.assets.iter().find(|a| a.name == *name));
     Ok(match asset {
-        Some(a) => Outcome::Available {
-            version,
-            download_url: a.browser_download_url.clone(),
-            page_url,
-        },
+        Some(a) => {
+            let sig_name = format!("{}.sig", a.name);
+            let package = Package {
+                file: a.name.clone(),
+                size: a.size,
+                sha256: a
+                    .digest
+                    .as_deref()
+                    .and_then(|d| d.strip_prefix("sha256:"))
+                    .map(str::to_string),
+                signature_url: release
+                    .assets
+                    .iter()
+                    .find(|s| s.name == sig_name)
+                    .map(|s| s.browser_download_url.clone()),
+            };
+            Outcome::Available {
+                version,
+                download_url: a.browser_download_url.clone(),
+                page_url,
+                package,
+            }
+        }
         None => Outcome::NoBuild { version, page_url },
     })
 }
@@ -244,6 +279,86 @@ pub fn fetch(timeout: Duration) -> Result<String, String> {
         });
     }
     String::from_utf8(out.stdout).map_err(|_| "response is not UTF-8".into())
+}
+
+/// Downloads `url` to `dest` with the system curl, reporting the bytes received
+/// so far. The file appears under `dest` only when complete; a broken
+/// connection or a stall of 30 s is an error, and `cancel` stops it.
+pub fn download(
+    url: &str,
+    dest: &std::path::Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut progress: impl FnMut(u64),
+) -> Result<(), String> {
+    let part = dest.with_extension("part");
+    std::fs::remove_file(&part).ok();
+    let agent = format!("KERN/{}", env!("CARGO_PKG_VERSION"));
+    let mut child = curl()
+        .args(["-sS", "-L", "--fail", "--proto", "=https,file"])
+        .args([
+            "--connect-timeout",
+            "20",
+            "--speed-time",
+            "30",
+            "--speed-limit",
+            "1",
+        ])
+        .args(["-A", &agent, "-o"])
+        .arg(&part)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run curl: {e}"))?;
+    let status = loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            child.kill().ok();
+            child.wait().ok();
+            std::fs::remove_file(&part).ok();
+            return Err("cancelled".into());
+        }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        progress(std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0));
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    if !status.success() {
+        let mut err = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            use std::io::Read;
+            e.read_to_string(&mut err).ok();
+        }
+        std::fs::remove_file(&part).ok();
+        let err = err.trim().trim_start_matches("curl: ").trim();
+        return Err(if err.is_empty() {
+            format!("the download stopped (curl {status})")
+        } else {
+            format!(
+                "the download stopped: {}",
+                err.chars().take(200).collect::<String>()
+            )
+        });
+    }
+    progress(std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0));
+    std::fs::rename(&part, dest).map_err(|e| e.to_string())
+}
+
+/// Text of a small file (the `.sig`), with the same rules as the release list.
+pub fn fetch_text(url: &str, timeout: Duration) -> Result<String, String> {
+    let out = curl()
+        .args(["-sS", "-L", "--fail", "--proto", "=https,file"])
+        .args(["--max-time", &timeout.as_secs().max(1).to_string()])
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run curl: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!("cannot get the update signature: {err}"));
+    }
+    String::from_utf8(out.stdout).map_err(|_| "the signature is not text".into())
 }
 
 /// Fetch and evaluate for the running build.
@@ -304,16 +419,25 @@ mod tests {
         ])
         .to_string();
         let mac = evaluate(&json, &v("0.9.0"), "macos", "aarch64").unwrap();
+        let Outcome::Available {
+            version,
+            download_url,
+            page_url,
+            package,
+        } = mac
+        else {
+            panic!("{mac:?}")
+        };
+        assert_eq!(version, v("0.10.0"));
         assert_eq!(
-            mac,
-            Outcome::Available {
-                version: v("0.10.0"),
-                download_url:
-                    "https://github.com/meytyy/kern/releases/download/v0.10.0/KERN-macos-arm64.zip"
-                        .into(),
-                page_url: "https://github.com/meytyy/kern/releases/tag/v0.10.0".into(),
-            }
+            download_url,
+            "https://github.com/meytyy/kern/releases/download/v0.10.0/KERN-macos-arm64.zip"
         );
+        assert_eq!(
+            page_url,
+            "https://github.com/meytyy/kern/releases/tag/v0.10.0"
+        );
+        assert_eq!(package.file, "KERN-macos-arm64.zip");
         let Outcome::Available { download_url, .. } =
             evaluate(&json, &v("0.9.0"), "windows", "x86_64").unwrap()
         else {

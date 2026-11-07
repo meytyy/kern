@@ -115,6 +115,20 @@ pub fn parse_env_output(bytes: &[u8]) -> Option<HashMap<String, String>> {
     Some(env)
 }
 
+pub fn mark_running() {}
+
+/// In-app installation is Windows-only for now; macOS opens the download.
+pub fn launch_update(_installer: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "installing from KERN is not available on this platform",
+    ))
+}
+
+/// Only Windows has verbatim paths to simplify.
+pub fn simplify_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
+}
+
 /// Shows `path` selected in Finder.
 pub fn reveal(path: &std::path::Path) -> std::io::Result<()> {
     Command::new("/usr/bin/open")

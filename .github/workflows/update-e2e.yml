@@ -1,0 +1,245 @@
+name: Windows update and Explorer check
+
+# End-to-end on a fresh Windows machine, with the scripted test driver built in:
+# installs KERN, moves files and folders with spaces and Cyrillic to the Recycle
+# Bin (and restores one), checks the Explorer name field, then updates KERN from
+# inside the app to a second test version: an interrupted download, a truncated
+# file and a damaged package are refused first. Test builds carry a throwaway
+# signing key made here; release builds use the release key.
+on:
+  workflow_dispatch:
+  push:
+    branches: [update-e2e]
+
+jobs:
+  e2e:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain and Inno Setup
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
+          rustup default stable
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Throwaway signing key
+        run: |
+          $pub = (cargo run -q --example kern_update_key -- keygen "$env:RUNNER_TEMP\test.key" | Select-Object -Last 1).Trim()
+          if ($pub.Length -ne 64) { throw "no key" }
+          "KERN_UPDATE_PUBKEY=$pub" >> $env:GITHUB_ENV
+
+      - name: Build test version A and B
+        run: |
+          function Build-Installer([string]$out) {
+            cargo build --release --features autotest --target x86_64-pc-windows-msvc
+            if ($LASTEXITCODE) { throw "cargo build failed" }
+            New-Item -ItemType Directory -Force dist\windows\KERN | Out-Null
+            Copy-Item target\x86_64-pc-windows-msvc\release\kern.exe dist\windows\KERN\KERN.exe -Force
+            $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+            & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\KERN.iss | Out-Null
+            if ($LASTEXITCODE) { throw "ISCC failed" }
+            Move-Item dist\windows\KERN-windows-x64-setup.exe $out -Force
+            Write-Host "built $v -> $out"
+          }
+          $a = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $p = $a.Split('.'); $b = "$($p[0]).$($p[1]).$([int]$p[2] + 1)"
+          "VERSION_A=$a" >> $env:GITHUB_ENV
+          "VERSION_B=$b" >> $env:GITHUB_ENV
+          Build-Installer "$env:RUNNER_TEMP\A-setup.exe"
+          # B: the same code with the next version number.
+          (Get-Content Cargo.toml -Raw) -replace "(?m)^version = `"$([regex]::Escape($a))`"", "version = `"$b`"" | Set-Content Cargo.toml -NoNewline
+          (Get-Content installer\KERN.iss -Raw) -replace "AppVersion `"$([regex]::Escape($a))`"", "AppVersion `"$b`"" | Set-Content installer\KERN.iss -NoNewline
+          (Get-Content assets\windows\kern.rc -Raw).Replace($a.Replace('.', ',') + ',0', $b.Replace('.', ',') + ',0').Replace("`"$a`"", "`"$b`"") | Set-Content assets\windows\kern.rc -NoNewline
+          New-Item -ItemType Directory -Force upd\good, upd\corrupt, upd\trunc, upd\feeds | Out-Null
+          Build-Installer "upd\good\KERN-windows-x64-setup.exe"
+          git checkout -- Cargo.toml Cargo.lock installer\KERN.iss assets\windows\kern.rc
+
+      - name: Signed, damaged and truncated packages; release lists
+        run: |
+          $good = Resolve-Path upd\good\KERN-windows-x64-setup.exe
+          cargo run -q --example kern_update_key -- sign "$env:RUNNER_TEMP\test.key" $env:VERSION_B $good
+          $bytes = [IO.File]::ReadAllBytes($good)
+          $bad = $bytes.Clone(); $bad[5000] = $bad[5000] -bxor 0xFF
+          [IO.File]::WriteAllBytes("$PWD\upd\corrupt\KERN-windows-x64-setup.exe", $bad)
+          [IO.File]::WriteAllBytes("$PWD\upd\trunc\KERN-windows-x64-setup.exe", $bytes[0..([int]($bytes.Length / 2))])
+          Copy-Item "$good.sig" upd\corrupt\ ; Copy-Item "$good.sig" upd\trunc\
+          $sha = (Get-FileHash $good -Algorithm SHA256).Hash.ToLower()
+          function Url([string]$p) { 'file:///' + (Join-Path $PWD $p).Replace('\', '/') }
+          function Feed([string]$name, [string]$dir, [bool]$digest) {
+            $asset = @{ name = 'KERN-windows-x64-setup.exe'; browser_download_url = (Url "upd\$dir\KERN-windows-x64-setup.exe"); size = $bytes.Length }
+            if ($digest) { $asset.digest = "sha256:$sha" }
+            $sig = @{ name = 'KERN-windows-x64-setup.exe.sig'; browser_download_url = (Url "upd\good\KERN-windows-x64-setup.exe.sig"); size = 300 }
+            $release = @{ tag_name = "v$env:VERSION_B"; draft = $false; prerelease = $false; html_url = 'https://github.com/meytyy/kern/releases'; assets = @($asset, $sig) }
+            ConvertTo-Json -InputObject @($release) -Depth 5 | Set-Content "upd\feeds\$name.json"
+          }
+          Feed good good $true; Feed corrupt corrupt $false; Feed trunc trunc $false; Feed missing nowhere $false
+          Copy-Item upd\feeds\missing.json upd\feeds\feed.json
+          Get-Content upd\feeds\good.json
+
+      - name: Test project and script
+        run: |
+          $proj = 'C:\kern-test\Проект с пробелами'
+          New-Item -ItemType Directory -Force "$proj\Папка с файлами" | Out-Null
+          'one' | Set-Content "$proj\Мой файл.txt"
+          'two' | Set-Content "$proj\Папка с файлами\a.txt"
+          'open' | Set-Content "$proj\open.txt"
+          'dirty' | Set-Content "$proj\dirty.txt"
+          'keep' | Set-Content "$proj\keep.txt"
+          $f = "$PWD\upd\feeds"
+          $a = $env:VERSION_A; $b = $env:VERSION_B
+          @"
+          # Explorer: Recycle Bin (spaces, Cyrillic, open files) and the name field
+          onversion $a open $proj
+          onversion $a waitfor 15 project Проект с пробелами
+          onversion $a side files
+          onversion $a sleep 1500
+          onversion $a trash Мой файл.txt
+          onversion $a waitfor 15 missing Мой файл.txt
+          onversion $a check toast Recycle Bin
+          onversion $a trash Папка с файлами
+          onversion $a sleep 300
+          onversion $a check confirmbody Папка с файлами
+          onversion $a confirmchoose Move to Recycle Bin
+          onversion $a waitfor 15 missing Папка с файлами
+          onversion $a openfile open.txt
+          onversion $a waitfor 10 active open.txt
+          onversion $a trash open.txt
+          onversion $a waitfor 15 missing open.txt
+          onversion $a check notabopen open.txt
+          onversion $a openfile dirty.txt
+          onversion $a waitfor 10 active dirty.txt
+          onversion $a focus editor
+          onversion $a sleep 300
+          onversion $a type changed
+          onversion $a sleep 300
+          onversion $a trash dirty.txt
+          onversion $a sleep 300
+          onversion $a check confirmbody unsaved changes
+          onversion $a confirmchoose Save and Move to Recycle Bin
+          onversion $a waitfor 15 missing dirty.txt
+          onversion $a openfile keep.txt
+          onversion $a waitfor 10 active keep.txt
+          onversion $a treenew . file
+          onversion $a sleep 500
+          onversion $a check edit field
+          onversion $a focus editor
+          onversion $a sleep 500
+          onversion $a check edit none
+          onversion $a treenew . folder
+          onversion $a sleep 500
+          onversion $a key escape
+          onversion $a sleep 300
+          onversion $a check edit none
+          # Update from inside KERN
+          onversion $a waitfor 30 updatenotice v$b
+          onversion $a action DownloadUpdate
+          onversion $a waitfor 60 updatephase failed download stopped
+          onversion $a shell copy /Y "$f\trunc.json" "$f\feed.json"
+          onversion $a action CheckForUpdates
+          onversion $a waitfor 20 updateidle
+          onversion $a sleep 500
+          onversion $a action DownloadUpdate
+          onversion $a waitfor 60 updatephase failed incomplete
+          onversion $a shell copy /Y "$f\corrupt.json" "$f\feed.json"
+          onversion $a action CheckForUpdates
+          onversion $a waitfor 20 updateidle
+          onversion $a sleep 500
+          onversion $a action DownloadUpdate
+          onversion $a waitfor 60 updatephase failed damaged
+          onversion $a shell copy /Y "$f\good.json" "$f\feed.json"
+          onversion $a action CheckForUpdates
+          onversion $a waitfor 20 updateidle
+          onversion $a sleep 500
+          onversion $a action DownloadUpdate
+          onversion $a waitfor 120 updatephase ready
+          onversion $a sleep 4000
+          onversion $a focus editor
+          onversion $a type unsaved
+          onversion $a sleep 300
+          onversion $a action RestartToUpdate
+          onversion $a sleep 500
+          onversion $a check confirmbody unsaved changes
+          onversion $a confirmchoose Save and Restart
+          # The new version, started again by the installer
+          onversion $b sleep 3000
+          onversion $b version $b
+          onversion $b open $proj
+          onversion $b waitfor 15 project Проект с пробелами
+          onversion $b check disk keep.txt unsaved
+          onversion $b action AboutKern
+          onversion $b sleep 300
+          onversion $b about Version $b
+          onversion $b sleep 6000
+          onversion $b quit
+          "@ | Set-Content "$env:RUNNER_TEMP\script.txt"
+
+      - name: Install A, run the script, update to B
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          New-Item -ItemType Directory -Force shots | Out-Null
+          function Shot([string]$name) {
+            Get-Process | Where-Object { $_.MainWindowTitle -eq 'System Properties' } | Stop-Process -Force -ErrorAction SilentlyContinue
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bmp.Save("shots\$name.png", [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose()
+          }
+          Start-Process "$env:RUNNER_TEMP\A-setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $exe = Join-Path $env:ProgramFiles 'KERN\KERN.exe'
+          "installed: $((Get-Item $exe).VersionInfo.ProductVersion)" | Tee-Object shots\versions.txt
+          $log = "$env:RUNNER_TEMP\autotest.log"
+          $env:KERN_CONFIG_DIR = "$env:RUNNER_TEMP\kern-config"
+          $env:KERN_AUTOTEST = "$env:RUNNER_TEMP\script.txt"
+          $env:KERN_AUTOTEST_LOG = $log
+          $env:KERN_UPDATE_URL = 'file:///' + "$PWD\upd\feeds\feed.json".Replace('\', '/')
+          Start-Process $exe
+          $taken = @{}
+          $marks = @{ 'updatephase failed download stopped' = 'a-interrupted'; 'updatephase failed incomplete' = 'a-truncated'; 'updatephase failed damaged' = 'a-damaged'; 'updatephase ready' = 'a-ready'; 'about Version' = 'b-about'; 'check edit none' = 'a-explorer' }
+          for ($i = 0; $i -lt 400; $i++) {
+            Start-Sleep -Milliseconds 750
+            $text = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
+            foreach ($k in $marks.Keys) {
+              if (-not $taken[$k] -and $text -match [regex]::Escape("ok   $k")) { Start-Sleep -Milliseconds 400; Shot $marks[$k]; $taken[$k] = $true }
+            }
+            if ($text -match "\[autotest $([regex]::Escape($env:VERSION_B))\] done") { break }
+          }
+          Start-Sleep 2
+          Copy-Item $log shots\autotest.log -ErrorAction SilentlyContinue
+          "after update: $((Get-Item $exe).VersionInfo.ProductVersion)" | Tee-Object -Append shots\versions.txt
+          Get-Process KERN -ErrorAction SilentlyContinue | Stop-Process -Force
+          Get-Content $log
+          if ((Get-Item $exe).VersionInfo.ProductVersion -ne $env:VERSION_B) { throw "KERN was not updated" }
+          if ((Select-String -Path $log -Pattern '^\[autotest .*\] FAIL').Count -gt 0) { throw "script steps failed" }
+          if (-not (Select-String -Path $log -Pattern "\[autotest $([regex]::Escape($env:VERSION_B))\] ok   about Version $([regex]::Escape($env:VERSION_B))")) { throw "About of the new version not seen" }
+          if (-not (Test-Path "$env:KERN_CONFIG_DIR\settings.json")) { throw "settings lost" }
+
+      - name: Recycle Bin has the items, and one comes back
+        run: |
+          $bin = (New-Object -ComObject Shell.Application).NameSpace(10)
+          $names = @($bin.Items() | ForEach-Object { $_.Name })
+          $names | Tee-Object shots\recycle-bin.txt
+          foreach ($n in 'Мой файл.txt', 'Папка с файлами', 'open.txt', 'dirty.txt') {
+            if ($names -notcontains $n) { throw "$n is not in the Recycle Bin" }
+          }
+          $item = $bin.Items() | Where-Object { $_.Name -eq 'Мой файл.txt' } | Select-Object -First 1
+          $item.InvokeVerb('undelete'); Start-Sleep 3
+          $back = 'C:\kern-test\Проект с пробелами\Мой файл.txt'
+          if (-not (Test-Path -LiteralPath $back)) { throw "not restored" }
+          "restored: $(Get-Content -LiteralPath $back)" | Tee-Object -Append shots\recycle-bin.txt
+
+      - name: Unit tests (Windows)
+        continue-on-error: true
+        run: cargo test --locked --target x86_64-pc-windows-msvc -- --nocapture platform::windows 2>&1 | Select-String -Pattern 'SHFileOperationW|test |test result'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: update-e2e
+          path: shots/

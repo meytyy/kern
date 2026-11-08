@@ -1065,8 +1065,10 @@ impl MediaView {
     /// else (and these keys anywhere else) keeps its usual meaning.
     #[cfg(any(target_os = "macos", windows))]
     fn player_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        // Fn is not checked: macOS reports it for the arrow keys and for
+        // keys of some keyboards.
         let m = &ev.keystroke.modifiers;
-        if m.control || m.platform || m.alt || m.function {
+        if m.control || m.platform || m.alt {
             return;
         }
         let Content::Video(v) = &mut self.content else {

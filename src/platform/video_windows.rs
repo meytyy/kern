@@ -100,9 +100,20 @@ impl VideoPlayer {
             engine
                 .SetPreload(MF_MEDIA_ENGINE_PRELOAD_AUTOMATIC)
                 .map_err(why)?;
-            let url = BSTR::from(crate::lsp::path_to_uri(path));
-            engine.SetSource(&url).map_err(why)?;
-            engine.Load().map_err(why)?;
+            // KERN opens the file itself and hands the engine its bytes: a path
+            // given as a URL is not found when it has non-ASCII names in it
+            // ("C:\\Медиа\\clip.mp4"). The name only tells the format.
+            let wide = windows::core::HSTRING::from(path.as_os_str());
+            let stream = MFCreateFile(
+                MF_ACCESSMODE_READ,
+                MF_OPENMODE_FAIL_IF_NOT_EXIST,
+                MF_FILEFLAGS_NONE,
+                &wide,
+            )
+            .map_err(|e| format!("cannot open the file: {}", why(e)))?;
+            let ex: IMFMediaEngineEx = engine.cast().map_err(why)?;
+            let name = BSTR::from(path.to_string_lossy().as_ref());
+            ex.SetSourceFromByteStream(&stream, &name).map_err(why)?;
             let wic: IWICImagingFactory =
                 CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
                     .map_err(why)?;
@@ -316,7 +327,16 @@ mod tests {
                 windows::Win32::System::Com::COINIT_MULTITHREADED,
             );
         }
-        let clip = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/clip-h264-aac.mp4");
+        // In a folder with a Cyrillic name and a space, as people keep them.
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("Видео с отпуска");
+        std::fs::create_dir_all(&folder).unwrap();
+        let clip = folder.join("ролик.mp4");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/clip-h264-aac.mp4"),
+            &clip,
+        )
+        .unwrap();
         let mut p = VideoPlayer::open(&clip).expect("open");
         let start = std::time::Instant::now();
         while p.status() == Status::Loading && start.elapsed().as_secs() < 20 {

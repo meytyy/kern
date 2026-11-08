@@ -155,10 +155,10 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
                     cx.background_spawn(async move {
                         let cmd = std::env::var("KERN_SHOT_CMD").unwrap_or_default();
                         if !cmd.is_empty() {
-                            let _ = std::process::Command::new(cmd)
-                                .arg(std::process::id().to_string())
-                                .arg(&name)
-                                .status();
+                            let mut c = std::process::Command::new(cmd);
+                            c.arg(std::process::id().to_string()).arg(&name);
+                            no_window(&mut c);
+                            let _ = c.status();
                         }
                     })
                     .await;
@@ -366,6 +366,7 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
                             use std::os::windows::process::CommandExt;
                             let mut c = std::process::Command::new("cmd");
                             c.raw_arg("/C").raw_arg(&script);
+                            no_window(&mut c);
                             c
                         };
                         #[cfg(not(windows))]
@@ -2084,5 +2085,15 @@ impl KernApp {
                 .await?
                 .map(|h| serde_json::to_string(&h.contents).unwrap_or_default()))
         }))
+    }
+}
+
+/// Helper commands run without a console window of their own: on Windows one
+/// would cover KERN in screenshots and take the keyboard focus.
+fn no_window(_c: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        _c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
 }

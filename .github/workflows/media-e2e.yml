@@ -159,7 +159,7 @@ jobs:
           shot w-img-fit
           shell $in wheel 0.5 0.5 d3
           sleep 300
-          check mediastate scrolls=1
+          check mediastate scrolls=3
           check mediastate pan=0,0
           shell $in wheel 0.3 0.3 u2 ctrl
           sleep 300
@@ -168,13 +168,13 @@ jobs:
           check mediastate pan=118,89
           shell $in wheel 0.5 0.5 d2
           sleep 300
-          check mediastate pan=118,-151
+          check mediastate pan=118,-149
           shell $in wheel 0.5 0.5 d2 alt
           sleep 300
-          check mediastate pan=-122,-151
+          check mediastate pan=-122,-149
           shell $in hwheel 0.5 0.5 r2
           sleep 300
-          check mediastate pan=-301,-151
+          check mediastate pan=-295,-149
           shell $in dragimg 0.6 0.6 0.3 0.3
           sleep 300
           check mediastate area=

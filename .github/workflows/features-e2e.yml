@@ -64,10 +64,14 @@ jobs:
           'data' | Set-Content "$t\work\lib\data.txt"
           $rnd = New-Object byte[] 300000; (New-Object Random 7).NextBytes($rnd)
           [IO.File]::WriteAllBytes("$t\work\app\blob.bin", $rnd)
+          # tar.exe cannot open Cyrillic paths: build in an ASCII folder, then copy.
           Push-Location "$t\work"
-          tar -czf "$proj\Kayo-1.0.1-update.tar.gz" app
-          tar -a -cf "$proj\bundle.zip" lib
+          tar -czf Kayo-1.0.1-update.tar.gz app
+          if ($LASTEXITCODE) { throw "tar failed" }
+          tar -a -cf bundle.zip lib
+          if ($LASTEXITCODE) { throw "zip failed" }
           Pop-Location
+          Copy-Item "$t\work\Kayo-1.0.1-update.tar.gz", "$t\work\bundle.zip" $proj
           $tgz = [IO.File]::ReadAllBytes("$proj\Kayo-1.0.1-update.tar.gz")
           [IO.File]::WriteAllBytes("$proj\broken.tar.gz", $tgz[0..([int]($tgz.Length / 2))])
           [IO.File]::WriteAllBytes("$proj\tool.bin", [byte[]](0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0) + $rnd[0..2000])

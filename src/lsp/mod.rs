@@ -24,9 +24,13 @@ mod tests {
 
     #[test]
     fn uri_roundtrip_with_spaces_and_cyrillic() {
-        let p = Path::new("/tmp/мой проект/App file.tsx");
+        let (p, prefix) = if cfg!(windows) {
+            (Path::new(r"C:\мой проект\App file.tsx"), "file:///C:/")
+        } else {
+            (Path::new("/tmp/мой проект/App file.tsx"), "file:///tmp/")
+        };
         let uri = path_to_uri(p);
-        assert!(uri.starts_with("file:///tmp/") && !uri.contains(' '));
+        assert!(uri.starts_with(prefix) && !uri.contains(' '), "{uri}");
         assert_eq!(uri_to_path(&uri).unwrap(), p);
     }
 }

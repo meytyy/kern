@@ -216,7 +216,7 @@ mod tests {
         let files = list_files(d.path(), &cancel);
         let names: Vec<String> = files
             .iter()
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(names.contains(&"src/App.tsx".to_string()));
         for bad in [

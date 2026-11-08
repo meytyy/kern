@@ -950,6 +950,7 @@ mod tests {
             cfg.init_options["tsserver"]["path"]
                 .as_str()
                 .unwrap()
+                .replace('\\', "/")
                 .ends_with("typescript/lib")
         );
         assert!(server_for(Path::new("/x/y.toml"), d.path(), &Settings::default()).is_none());

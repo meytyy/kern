@@ -450,8 +450,11 @@ mod tests {
         assert!(lines > 0);
         sh(&dest, &["config", "user.email", "t@example.com"]);
         sh(&dest, &["config", "user.name", "T"]);
+        // Git for Windows may check files out with CRLF (core.autocrlf).
         assert_eq!(
-            std::fs::read_to_string(dest.join("a b.txt")).unwrap(),
+            std::fs::read_to_string(dest.join("a b.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "one\n"
         );
         assert!(

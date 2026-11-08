@@ -1,0 +1,306 @@
+name: Windows photo and video check
+
+# On a fresh Windows machine, with the scripted test driver built in: installs
+# KERN and drives it with real Windows input (mouse_event and SendKeys, not the
+# driver's synthetic events). Photo: wheel, Ctrl+wheel around the pointer,
+# Alt+wheel, a horizontal wheel, dragging and the limits. Video (H.264 + AAC):
+# picture, play and pause, Space and the arrows, clicking and dragging the seek
+# bar, mute and volume, F and Esc for full screen, the hiding controls, a double
+# click, closing the tab, a damaged file. Also decodes the clip without a window.
+on:
+  workflow_dispatch:
+  push:
+    branches: [video-win]
+
+jobs:
+  e2e:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust, Inno Setup and ffmpeg
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
+          rustup default stable
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+          choco install ffmpeg -y --no-progress | Out-Null
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version
+          Get-CimInstance Win32_SoundDevice | Select-Object Name, Status
+
+      - name: Build and install KERN with the test driver
+        run: |
+          cargo build --release --features autotest --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { throw "cargo build failed" }
+          New-Item -ItemType Directory -Force dist\windows\KERN, shots | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\kern.exe dist\windows\KERN\KERN.exe -Force
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\KERN.iss | Out-Null
+          if ($LASTEXITCODE) { throw "ISCC failed" }
+          Start-Process dist\windows\KERN-windows-x64-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+
+      - name: Media files, input helper and script
+        run: |
+          $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + $env:Path
+          $t = 'C:\kern-test'
+          $proj = "$t\Медиа"
+          New-Item -ItemType Directory -Force "$t\work", "$t\shots", $proj | Out-Null
+          # ffmpeg writes in an ASCII folder; the files are copied into the Cyrillic one.
+          Push-Location "$t\work"
+          ffmpeg -v error -y -f lavfi -i "testsrc2=size=3000x2000" -frames:v 1 big.png
+          ffmpeg -v error -y -f lavfi -i "testsrc=size=320x200" -frames:v 1 small.png
+          ffmpeg -v error -y -f lavfi -i "testsrc2=size=1280x720:rate=30:duration=30" -f lavfi -i "sine=frequency=330:sample_rate=44100:duration=30" -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 32 -c:a aac -b:a 64k -movflags +faststart -shortest long.mp4
+          ffmpeg -v error -y -f lavfi -i "testsrc2=size=320x240:rate=25:duration=2" -c:v libvpx -b:v 300k clip.webm
+          $rnd = New-Object byte[] 200000; (New-Object Random 3).NextBytes($rnd)
+          [IO.File]::WriteAllBytes("$t\work\broken.mp4", $rnd)
+          Pop-Location
+          Copy-Item "$t\work\*" $proj
+          Get-ChildItem $proj | Format-Table Name, Length
+
+          # Real Windows input. Element rectangles ("area=", "bar=", "vbar=") are
+          # read from the last line of the test log that has them; positions are
+          # fractions of those rectangles, turned into screen pixels.
+          @'
+          param([string]$cmd, [string]$a1 = '', [string]$a2 = '', [string]$a3 = '', [string]$a4 = '', [string]$a5 = '')
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type @"
+          using System; using System.Runtime.InteropServices;
+          public static class Inp {
+            [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, int data, UIntPtr e);
+            [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte sc, uint f, UIntPtr e);
+            [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+          }
+          "@
+          $p = Get-Process KERN | Select-Object -First 1
+          $h = $p.MainWindowHandle
+          [void](New-Object -ComObject WScript.Shell).AppActivate($p.Id)
+          Start-Sleep -Milliseconds 300
+          function At([double]$x, [double]$y) {
+            $pt = New-Object Inp+POINT; $pt.X = [int]$x; $pt.Y = [int]$y
+            [void][Inp]::ClientToScreen($h, [ref]$pt); [void][Inp]::SetCursorPos($pt.X, $pt.Y)
+            Start-Sleep -Milliseconds 60
+          }
+          function Mods([string]$m, [bool]$down) {
+            $f = if ($down) { 0 } else { 2 }
+            if ($m -match 'ctrl') { [Inp]::keybd_event(0x11, 0, $f, [UIntPtr]::Zero) }
+            if ($m -match 'alt') { [Inp]::keybd_event(0x12, 0, $f, [UIntPtr]::Zero) }
+          }
+          function Rect([string]$name) {
+            $hit = Select-String -Path 'C:\kern-test\autotest.log' -Pattern "\b$name=(-?\d+),(-?\d+),(\d+),(\d+)" | Select-Object -Last 1
+            $g = $hit.Matches[0].Groups
+            return @([double]$g[1].Value, [double]$g[2].Value, [double]$g[3].Value, [double]$g[4].Value)
+          }
+          function Click() { [Inp]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 40; [Inp]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 80 }
+          function Drag([double]$x1, [double]$y1, [double]$x2, [double]$y2) {
+            At $x1 $y1; [Inp]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+            for ($i = 1; $i -le 10; $i++) { At ($x1 + ($x2 - $x1) * $i / 10) ($y1 + ($y2 - $y1) * $i / 10) }
+            [Inp]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 100
+          }
+          switch ($cmd) {
+            'wheel' {
+              # wheel fx fy notches [ctrl|alt]; positive notches turn the wheel away from you
+              $r = Rect 'area'; At ($r[0] + $r[2] * [double]$a1) ($r[1] + $r[3] * [double]$a2)
+              Mods $a4 $true
+              for ($i = 0; $i -lt [math]::Abs([int]$a3); $i++) { [Inp]::mouse_event(0x0800, 0, 0, 120 * [math]::Sign([int]$a3), [UIntPtr]::Zero); Start-Sleep -Milliseconds 40 }
+              Start-Sleep -Milliseconds 60; Mods $a4 $false
+            }
+            'hwheel' {
+              $r = Rect 'area'; At ($r[0] + $r[2] * [double]$a1) ($r[1] + $r[3] * [double]$a2)
+              [Inp]::mouse_event(0x1000, 0, 0, 120 * [int]$a3, [UIntPtr]::Zero)
+            }
+            'dragimg' {
+              $r = Rect 'area'
+              Drag ($r[0] + $r[2] * [double]$a1) ($r[1] + $r[3] * [double]$a2) ($r[0] + $r[2] * [double]$a3) ($r[1] + $r[3] * [double]$a4)
+            }
+            'seek' { $r = Rect 'bar'; At ($r[0] + $r[2] * [double]$a1) ($r[1] + $r[3] / 2); Click }
+            'seekdrag' { $r = Rect 'bar'; Drag ($r[0] + $r[2] * [double]$a1) ($r[1] + $r[3] / 2) ($r[0] + $r[2] * [double]$a2) ($r[1] + $r[3] / 2) }
+            'volume' { $r = Rect 'vbar'; At ($r[0] + $r[2] * [double]$a1) ($r[1] + $r[3] / 2); Click }
+            'play' { $r = Rect 'bar'; At ($r[0] + 11) ($r[1] + 33); Click }
+            'mute' { $r = Rect 'bar'; At ($r[0] + 45) ($r[1] + 33); Click }
+            'fullscreen' { $r = Rect 'bar'; At ($r[0] + $r[2] - 11) ($r[1] + 33); Click }
+            'dbl' { $r = Rect 'bar'; At ($r[0] + $r[2] / 2) ($r[1] - 150); Click; Click }
+            'move' { $r = Rect 'bar'; At ($r[0] + $r[2] / 2) ($r[1] - 200); At ($r[0] + $r[2] / 2 + 20) ($r[1] - 180) }
+            'key' {
+              $k = @{ space = ' '; left = '{LEFT}'; right = '{RIGHT}'; f = 'f'; esc = '{ESC}' }[$a1]
+              [System.Windows.Forms.SendKeys]::SendWait($k)
+            }
+          }
+          '@ | Set-Content "$t\input.ps1" -Encoding utf8BOM
+          @'
+          param([string]$name)
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("C:\kern-test\shots\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          '@ | Set-Content "$t\shot.ps1"
+          "@powershell -NoProfile -ExecutionPolicy Bypass -File C:\kern-test\shot.ps1 %2" | Set-Content "$t\shot.cmd" -Encoding ascii
+
+          $in = "powershell -NoProfile -ExecutionPolicy Bypass -File $t\input.ps1"
+          @"
+          open $proj
+          waitfor 15 project Медиа
+          side files
+          # Photo
+          openfile big.png
+          waitfor 10 mediastate image
+          sleep 1500
+          check mediastate fit=true
+          shot w-img-fit
+          shell $in wheel 0.5 0.5 -3
+          sleep 300
+          check mediastate pan=0,0
+          shell $in wheel 0.3 0.3 2 ctrl
+          sleep 300
+          check mediastate fit=false
+          shot w-img-ctrlwheel
+          shell $in wheel 0.5 0.5 -2
+          sleep 300
+          check mediastate area=
+          shell $in wheel 0.5 0.5 -2 alt
+          sleep 300
+          check mediastate area=
+          shell $in hwheel 0.5 0.5 2
+          sleep 300
+          check mediastate area=
+          shell $in dragimg 0.6 0.6 0.3 0.3
+          sleep 300
+          check mediastate area=
+          shell $in dragimg 0.3 0.3 1.5 1.5
+          sleep 300
+          check mediastate area=
+          shot w-img-dragged
+          media fit
+          check mediastate fit=true
+          openfile small.png
+          waitfor 10 mediastate 320.0
+          sleep 1000
+          check mediastate area=
+          shell $in wheel 0.5 0.5 2 ctrl
+          sleep 300
+          check mediastate pan=0,0
+          shell $in dragimg 0.5 0.5 0.2 0.2
+          sleep 300
+          check mediastate pan=0,0
+          # Video
+          openfile long.mp4
+          waitfor 30 mediastate frames=1
+          sleep 1500
+          check videoplayers 1
+          check mediastate bar=
+          shot w-vid-open
+          shell $in play
+          sleep 2500
+          check mediastate playing=true
+          shot w-vid-playing
+          shell $in key space
+          sleep 500
+          check mediastate playing=false
+          shell $in key right
+          sleep 500
+          check mediastate t=
+          shell $in key left
+          sleep 500
+          check mediastate t=
+          shell $in seek 0.25
+          sleep 500
+          check mediastate t=7.
+          shell $in seekdrag 0.25 0.75
+          sleep 500
+          check mediastate t=22.
+          shell $in mute
+          sleep 300
+          check mediastate muted=true
+          shell $in mute
+          sleep 300
+          check mediastate muted=false
+          shell $in volume 0.3
+          sleep 300
+          check mediastate vol=0.
+          shell $in seek 0.1
+          shell $in play
+          sleep 500
+          check mediastate playing=true
+          shell $in key f
+          sleep 2500
+          check mediastate fullscreen=true
+          check windowfullscreen 1
+          check mediastate playing=true
+          check mediastate vol=0.
+          shot w-vid-fullscreen
+          sleep 3500
+          check mediastate controls=false
+          shot w-vid-fullscreen-hidden
+          shell $in move
+          sleep 300
+          check mediastate controls=true
+          shell $in key esc
+          sleep 2000
+          check mediastate fullscreen=false
+          check windowfullscreen 0
+          check mediastate playing=true
+          check mediastate bar=
+          shell $in fullscreen
+          sleep 2000
+          check mediastate fullscreen=true
+          check windowfullscreen 1
+          shell $in key esc
+          sleep 2000
+          check mediastate fullscreen=false
+          check mediastate bar=
+          shell $in dbl
+          sleep 2000
+          check mediastate fullscreen=true
+          shell $in key esc
+          sleep 2000
+          check mediastate fullscreen=false
+          closetab
+          sleep 800
+          check videoplayers 0
+          # A damaged file and WebM
+          openfile broken.mp4
+          waitfor 20 mediastate failed
+          shot w-vid-broken
+          openfile clip.webm
+          sleep 5000
+          check mediastate o
+          shot w-vid-webm
+          quit
+          "@ | Set-Content "$t\script.txt"
+
+      - name: Run the script in the installed KERN
+        run: |
+          $log = 'C:\kern-test\autotest.log'
+          $env:KERN_CONFIG_DIR = 'C:\kern-test\config'
+          $env:KERN_AUTOTEST = 'C:\kern-test\script.txt'
+          $env:KERN_AUTOTEST_LOG = $log
+          $env:KERN_SHOT_CMD = 'C:\kern-test\shot.cmd'
+          $env:KERN_UPDATE_URL = 'file:///C:/kern-test/no-releases.json'
+          Start-Process (Join-Path $env:ProgramFiles 'KERN\KERN.exe')
+          for ($i = 0; $i -lt 600; $i++) {
+            Start-Sleep 1
+            if ((Test-Path $log) -and ((Get-Content $log -Raw) -match '\] done, ')) { break }
+          }
+          Start-Sleep 2
+          Get-Process KERN -ErrorAction SilentlyContinue | Stop-Process -Force
+          Copy-Item $log shots\autotest.log -ErrorAction SilentlyContinue
+          Copy-Item C:\kern-test\shots\*.png shots\ -ErrorAction SilentlyContinue
+          Get-Content $log
+          if (-not (Select-String -Path $log -Pattern '\] done, 0 failures')) { throw "script steps failed" }
+
+      - name: Decode the clip without a window
+        if: always()
+        run: cargo test --release --features autotest --target x86_64-pc-windows-msvc plays_the_h264_aac_clip -- --nocapture 2>&1 | Tee-Object shots\decode-test.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: media-e2e
+          path: shots/

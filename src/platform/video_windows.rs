@@ -44,6 +44,13 @@ impl IMFMediaEngineNotify_Impl for Notify_Impl {
     }
 }
 
+/// Players alive right now: a closed tab must leave none behind.
+static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn live_players() -> usize {
+    LIVE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub struct VideoPlayer {
     engine: IMFMediaEngine,
     wic: IWICImagingFactory,
@@ -99,6 +106,7 @@ impl VideoPlayer {
             let wic: IWICImagingFactory =
                 CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
                     .map_err(why)?;
+            LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Self {
                 engine,
                 wic,
@@ -227,7 +235,10 @@ impl VideoPlayer {
                 return None;
             }
             let (tw, th) = if w > MAX_WIDTH {
-                (MAX_WIDTH, ((h as u64 * MAX_WIDTH as u64) / w as u64).max(1) as u32)
+                (
+                    MAX_WIDTH,
+                    ((h as u64 * MAX_WIDTH as u64) / w as u64).max(1) as u32,
+                )
             } else {
                 (w, h)
             };
@@ -283,6 +294,7 @@ impl VideoPlayer {
 impl Drop for VideoPlayer {
     /// Stop the sound and release the decoder when a tab closes.
     fn drop(&mut self) {
+        LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         unsafe {
             let _ = self.engine.Pause();
             let _ = self.engine.Shutdown();
@@ -323,12 +335,19 @@ mod tests {
         while start.elapsed().as_secs() < 4 {
             if let Some(f) = p.poll_frame() {
                 assert_eq!((f.width, f.height), (640, 360));
-                lit |= f.bgra.chunks(4).any(|px| px[0] > 40 || px[1] > 40 || px[2] > 40);
+                lit |= f
+                    .bgra
+                    .chunks(4)
+                    .any(|px| px[0] > 40 || px[1] > 40 || px[2] > 40);
                 frames += 1;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        println!("frames {frames} at t={:?} status {:?}", p.current_time(), p.status());
+        println!(
+            "frames {frames} at t={:?} status {:?}",
+            p.current_time(),
+            p.status()
+        );
         assert!(frames > 20, "only {frames} frames");
         assert!(lit, "the frames are black");
         assert!(p.current_time().unwrap_or(0.0) > 1.0);

@@ -30,6 +30,13 @@ pub enum Status {
     Failed(String),
 }
 
+/// Players alive right now: a closed tab must leave none behind.
+static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn live_players() -> usize {
+    LIVE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub struct VideoPlayer {
     player: Retained<AnyObject>,
     item: Retained<AnyObject>,
@@ -89,6 +96,7 @@ impl VideoPlayer {
             let player: Retained<AnyObject> =
                 msg_send![class(c"AVPlayer")?, playerWithPlayerItem: &*item];
             let _: () = msg_send![&*player, pause];
+            LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Self {
                 player,
                 item,
@@ -207,6 +215,7 @@ impl VideoPlayer {
 impl Drop for VideoPlayer {
     /// Stop the sound and release the decoder when a tab closes.
     fn drop(&mut self) {
+        LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         unsafe {
             let _: () = msg_send![&*self.player, pause];
             let _: () = msg_send![&*self.item, removeOutput: &*self.output];

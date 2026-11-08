@@ -7,11 +7,21 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
-use std::time::Duration;
+#[cfg(any(target_os = "macos", windows))]
+use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use crate::platform::video::{Status, VideoPlayer};
+
+/// Pictures zoom between 2% and 3200%.
+const MIN_ZOOM: f32 = 0.02;
+const MAX_ZOOM: f32 = 32.0;
+/// The arrow keys in the player skip this far.
+#[cfg(any(target_os = "macos", windows))]
+const SKIP_SECONDS: f64 = 5.0;
+/// In full screen the controls go away after this long without the mouse moving.
+#[cfg(any(target_os = "macos", windows))]
+const CONTROLS_LINGER: Duration = Duration::from_millis(2500);
 
 /// Above this, a picture is not decoded: it could take gigabytes of memory.
 const MAX_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
@@ -97,31 +107,142 @@ struct ImageState {
     alpha: bool,
     note: Option<String>,
     zoom: Zoom,
+    /// Offset of the picture's centre from the centre of the view.
     pan: Point<Pixels>,
     last_drag: Option<Point<Pixels>>,
+    /// The picture area, in window coordinates.
     view: Size<Pixels>,
+    origin: Point<Pixels>,
     decode_failed: bool,
 }
 
+impl ImageState {
+    fn image_size(&self) -> (f32, f32) {
+        self.size.unwrap_or((512., 512.))
+    }
+
+    /// The scale that shows the whole picture, never above 100%.
+    fn fit(&self) -> f32 {
+        let (iw, ih) = self.image_size();
+        let (vw, vh) = (f32::from(self.view.width), f32::from(self.view.height));
+        if vw > 0. && vh > 0. {
+            (vw / iw).min(vh / ih).min(1.0)
+        } else {
+            1.0
+        }
+    }
+
+    fn scale(&self) -> f32 {
+        match self.zoom {
+            Zoom::Fit => self.fit(),
+            Zoom::Factor(f) => f,
+        }
+    }
+
+    /// Zoom to `scale`, keeping the point of the picture under `at` (window
+    /// coordinates; the centre of the view if `None`) where it is.
+    fn zoom_at(&mut self, scale: f32, at: Option<Point<Pixels>>) {
+        let (iw, ih) = self.image_size();
+        let (vw, vh) = (f32::from(self.view.width), f32::from(self.view.height));
+        let old = self.scale();
+        let new = scale.clamp(MIN_ZOOM, MAX_ZOOM);
+        let (ax, ay) = match at {
+            Some(p) => (
+                f32::from(p.x - self.origin.x),
+                f32::from(p.y - self.origin.y),
+            ),
+            None => (vw / 2., vh / 2.),
+        };
+        let left = (vw - iw * old) / 2. + f32::from(self.pan.x);
+        let top = (vh - ih * old) / 2. + f32::from(self.pan.y);
+        let (ix, iy) = ((ax - left) / old, (ay - top) / old);
+        self.pan = point(
+            px(ax - ix * new - (vw - iw * new) / 2.),
+            px(ay - iy * new - (vh - ih * new) / 2.),
+        );
+        self.zoom = Zoom::Factor(new);
+        self.clamp_pan();
+    }
+
+    /// A picture smaller than the view stays centred; a bigger one cannot be
+    /// moved so far that its edge comes inside the view.
+    fn clamp_pan(&mut self) {
+        let (iw, ih) = self.image_size();
+        let s = self.scale();
+        let (vw, vh) = (f32::from(self.view.width), f32::from(self.view.height));
+        let max_x = ((iw * s - vw) / 2.).max(0.);
+        let max_y = ((ih * s - vh) / 2.).max(0.);
+        self.pan = point(
+            px(f32::from(self.pan.x).clamp(-max_x, max_x)),
+            px(f32::from(self.pan.y).clamp(-max_y, max_y)),
+        );
+    }
+}
+
+/// A decoded picture as the platform hands it over: an IOSurface-backed pixel
+/// buffer drawn directly on macOS, BGRA pixels uploaded as an image on Windows.
 #[cfg(target_os = "macos")]
+type VideoFrame = SurfaceSource;
+#[cfg(windows)]
+type VideoFrame = Arc<RenderImage>;
+
+#[cfg(any(target_os = "macos", windows))]
 struct VideoState {
     player: VideoPlayer,
-    frame: Option<SurfaceSource>,
+    frame: Option<VideoFrame>,
+    /// Frames already replaced; their GPU copies are freed at the next render.
+    #[cfg(windows)]
+    retired: Vec<Arc<RenderImage>>,
     status: Status,
-    opened_at: std::time::Instant,
+    opened_at: Instant,
     frames_seen: u64,
     scrubbing: bool,
+    volume_dragging: bool,
     bar: Bounds<Pixels>,
     volume_bar: Bounds<Pixels>,
     current: f64,
     duration: f64,
+    /// Shown over the whole window; the app makes the window full screen.
+    fullscreen: bool,
+    last_motion: Instant,
+    controls_shown: bool,
     _ticker: Task<()>,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+impl VideoState {
+    /// Outside full screen the controls stay. In it they show while the mouse
+    /// moves, while paused and while a slider is dragged.
+    fn controls_wanted(&self) -> bool {
+        !self.fullscreen
+            || !self.player.is_playing()
+            || self.scrubbing
+            || self.volume_dragging
+            || self.last_motion.elapsed() < CONTROLS_LINGER
+    }
+
+    fn toggle_play(&self) {
+        if self.player.is_playing() {
+            self.player.pause()
+        } else {
+            self.player.play()
+        }
+    }
+
+    fn skip(&mut self, by: f64) {
+        let mut to = (self.current + by).max(0.);
+        if self.duration > 0. {
+            to = to.min(self.duration);
+        }
+        self.player.seek(to);
+        self.current = to;
+    }
 }
 
 enum Content {
     Loading,
     Image(ImageState),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     Video(VideoState),
     Failed(String),
     Archive {
@@ -135,6 +256,8 @@ pub struct MediaView {
     pub path: PathBuf,
     pub kind: MediaKind,
     content: Content,
+    /// The player's keys (Space, arrows, F, Esc) work while this is focused.
+    focus: FocusHandle,
 }
 
 impl MediaView {
@@ -143,6 +266,7 @@ impl MediaView {
             path,
             kind,
             content: Content::Loading,
+            focus: cx.focus_handle(),
         };
         match kind {
             MediaKind::Raster | MediaKind::Svg => view.load_image(cx),
@@ -177,6 +301,7 @@ impl MediaView {
                         pan: Point::default(),
                         last_drag: None,
                         view: size(px(0.), px(0.)),
+                        origin: Point::default(),
                         decode_failed: false,
                     }),
                     Err(e) => Content::Failed(e),
@@ -188,15 +313,15 @@ impl MediaView {
         .detach();
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     fn load_video(&mut self, _cx: &mut Context<Self>) {
         self.content = Content::Failed(
-            "This build plays video inside KERN only on macOS. Open it in the system player."
+            "This build plays video inside KERN only on macOS and Windows. Open it in the system player."
                 .into(),
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     fn load_video(&mut self, cx: &mut Context<Self>) {
         match VideoPlayer::open(&self.path) {
             Ok(player) => {
@@ -213,22 +338,28 @@ impl MediaView {
                 self.content = Content::Video(VideoState {
                     player,
                     frame: None,
+                    #[cfg(windows)]
+                    retired: Vec::new(),
                     status: Status::Loading,
-                    opened_at: std::time::Instant::now(),
+                    opened_at: Instant::now(),
                     frames_seen: 0,
                     scrubbing: false,
+                    volume_dragging: false,
                     bar: Bounds::default(),
                     volume_bar: Bounds::default(),
                     current: 0.0,
                     duration: 0.0,
+                    fullscreen: false,
+                    last_motion: Instant::now(),
+                    controls_shown: true,
                     _ticker: ticker,
                 });
             }
-            Err(e) => self.content = Content::Failed(e),
+            Err(e) => self.content = Content::Failed(format!("KERN cannot play this file: {e}")),
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     fn tick(&mut self, cx: &mut Context<Self>) {
         let Content::Video(v) = &mut self.content else {
             return;
@@ -250,7 +381,21 @@ impl MediaView {
             Status::Loading => {}
         }
         if let Some(frame) = v.player.poll_frame() {
-            v.frame = Some(SurfaceSource::from(frame));
+            #[cfg(target_os = "macos")]
+            {
+                v.frame = Some(SurfaceSource::from(frame));
+            }
+            #[cfg(windows)]
+            if let Some(pixels) = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra)
+            {
+                // The buffer holds BGRA, which is what a RenderImage stores.
+                let picture = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
+                    pixels
+                )]));
+                if let Some(old) = v.frame.replace(picture) {
+                    v.retired.push(old);
+                }
+            }
             v.frames_seen += 1;
             changed = true;
         }
@@ -278,6 +423,9 @@ impl MediaView {
             v.duration = dur;
             changed = true;
         }
+        if v.controls_wanted() != v.controls_shown {
+            changed = true;
+        }
         if changed {
             cx.notify();
         }
@@ -285,10 +433,34 @@ impl MediaView {
 
     /// Called when the tab is no longer the visible one.
     pub fn on_hidden(&mut self) {
-        #[cfg(target_os = "macos")]
-        if let Content::Video(v) = &self.content {
+        #[cfg(any(target_os = "macos", windows))]
+        if let Content::Video(v) = &mut self.content {
             v.player.pause();
+            v.fullscreen = false;
         }
+    }
+
+    /// The player covers the whole window.
+    pub fn is_fullscreen(&self) -> bool {
+        #[cfg(any(target_os = "macos", windows))]
+        if let Content::Video(v) = &self.content {
+            return v.fullscreen;
+        }
+        false
+    }
+
+    /// Full screen on or off. Playback, position and volume stay as they are:
+    /// it is the same player, drawn somewhere else.
+    pub fn set_fullscreen(&mut self, on: bool, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "macos", windows))]
+        if let Content::Video(v) = &mut self.content
+            && v.fullscreen != on
+        {
+            v.fullscreen = on;
+            v.last_motion = Instant::now();
+            cx.notify();
+        }
+        let _ = (on, cx);
     }
 
     #[cfg(feature = "autotest")]
@@ -298,14 +470,22 @@ impl MediaView {
             Content::Failed(e) => format!("failed: {e}"),
             Content::Archive { .. } | Content::Binary(_) => self.summary(),
             Content::Image(i) => format!(
-                "image {:?} {} failed={} note={:?}",
-                i.size, i.format, i.decode_failed, i.note
+                "image {:?} {} failed={} note={:?} zoom={:.0}% fit={} pan={:.0},{:.0} area={}",
+                i.size,
+                i.format,
+                i.decode_failed,
+                i.note,
+                i.scale() * 100.,
+                i.zoom == Zoom::Fit,
+                f32::from(i.pan.x) + 0.,
+                f32::from(i.pan.y) + 0.,
+                rect(Bounds::new(i.origin, i.view))
             ),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Content::Video(v) => {
                 let (w, h) = v.player.natural_size();
                 format!(
-                    "video {}x{} frames={} playing={} t={:.2}/{:.2} vol={:.2} muted={}",
+                    "video {}x{} frames={} playing={} t={:.2}/{:.2} vol={:.2} muted={} fullscreen={} controls={} bar={} vbar={}",
                     w,
                     h,
                     v.frames_seen,
@@ -313,7 +493,11 @@ impl MediaView {
                     v.current,
                     v.duration,
                     v.player.volume(),
-                    v.player.muted()
+                    v.player.muted(),
+                    v.fullscreen,
+                    v.controls_shown,
+                    rect(v.bar),
+                    rect(v.volume_bar)
                 )
             }
         }
@@ -322,23 +506,26 @@ impl MediaView {
     #[cfg(feature = "autotest")]
     pub fn test_action(&mut self, action: &str, cx: &mut Context<Self>) {
         match (&mut self.content, action) {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             (Content::Video(v), "play") => v.player.play(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             (Content::Video(v), "pause") => v.player.pause(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             (Content::Video(v), "seekmid") => v.player.seek(v.duration / 2.0),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             (Content::Video(v), "mute") => v.player.set_muted(true),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             (Content::Video(v), "vol50") => v.player.set_volume(0.5),
-            (Content::Image(i), "100") => i.zoom = Zoom::Factor(1.0),
+            (Content::Image(i), "100") => i.zoom_at(1.0, None),
             (Content::Image(i), "fit") => {
                 i.zoom = Zoom::Fit;
                 i.pan = Point::default();
             }
-            (Content::Image(i), "in") => i.zoom = Zoom::Factor(4.0),
-            (Content::Image(i), "pan") => i.pan = point(px(-40.), px(-30.)),
+            (Content::Image(i), "in") => i.zoom_at(4.0, None),
+            (Content::Image(i), "pan") => {
+                i.pan = point(px(-40.), px(-30.));
+                i.clamp_pan();
+            }
             _ => {}
         }
         cx.notify();
@@ -383,7 +570,7 @@ impl MediaView {
             Content::Loading => "loading".into(),
             Content::Failed(m) => format!("failed: {m}"),
             Content::Image(_) => "image".into(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Content::Video(_) => "video".into(),
             Content::Binary(desc) => format!("binary: {desc}"),
             Content::Archive { kind, listing } => match listing {
@@ -601,8 +788,16 @@ impl MediaView {
                 ),
             )
             .child(
-                button("media-open", "Open With Default App", p)
-                    .on_click(cx.listener(|this, _, _, _| this.open_externally())),
+                button(
+                    "media-open",
+                    if self.kind == MediaKind::Video {
+                        "Open in External Player"
+                    } else {
+                        "Open With Default App"
+                    },
+                    p,
+                )
+                .on_click(cx.listener(|this, _, _, _| this.open_externally())),
             )
             .into_any_element()
     }
@@ -610,32 +805,25 @@ impl MediaView {
     fn render_image(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
         let entity = cx.entity();
+        if matches!(&self.content, Content::Image(s) if s.decode_failed) {
+            return self.render_failed(
+                "This image file is damaged or cannot be decoded.".to_string(),
+                cx,
+            );
+        }
         let Content::Image(state) = &mut self.content else {
             return div().into_any_element();
         };
         let Some(source) = state.source.clone() else {
             return div().into_any_element();
         };
-        let (iw, ih) = state.size.unwrap_or((512., 512.));
-        let view = state.view;
-        let (vw, vh) = (f32::from(view.width), f32::from(view.height));
-        let fit = if vw > 0. && vh > 0. {
-            (vw / iw).min(vh / ih).min(1.0)
-        } else {
-            1.0
-        };
-        let scale = match state.zoom {
-            Zoom::Fit => fit,
-            Zoom::Factor(f) => f,
-        };
+        state.clamp_pan();
+        let (iw, ih) = state.image_size();
+        let (vw, vh) = (f32::from(state.view.width), f32::from(state.view.height));
+        let scale = state.scale();
         let (dw, dh) = (iw * scale, ih * scale);
-        let zoomed_in = dw > vw || dh > vh;
-        // Panning is limited so that the picture cannot be lost off screen.
-        let (max_x, max_y) = (((dw - vw) / 2.).max(0.), ((dh - vh) / 2.).max(0.));
-        state.pan = point(
-            px(f32::from(state.pan.x).clamp(-max_x, max_x)),
-            px(f32::from(state.pan.y).clamp(-max_y, max_y)),
-        );
+        let movable = dw > vw + 0.5 || dh > vh + 0.5;
+        let dragging = state.last_drag.is_some();
         let left = (vw - dw) / 2. + f32::from(state.pan.x);
         let top = (vh - dh) / 2. + f32::from(state.pan.y);
         let info = format!(
@@ -648,20 +836,18 @@ impl MediaView {
         let note = state.note.clone();
         let alpha = state.alpha;
         let is_fit = state.zoom == Zoom::Fit;
-        let failed = state.decode_failed;
-        let zoom_btn =
-            |id: &'static str, name: &'static str, cx: &mut Context<Self>, f: fn(f32) -> f32| {
-                icon_button(id, name, name).on_click(cx.listener(move |this, _, _, cx| {
+        let is_100 = state.zoom == Zoom::Factor(1.0);
+        let step = |id: &'static str, label: &'static str, hint: &'static str, by: f32| {
+            button(id, label, p)
+                .tooltip(hint)
+                .on_click(cx.listener(move |this, _, _, cx| {
                     if let Content::Image(s) = &mut this.content {
-                        let cur = match s.zoom {
-                            Zoom::Fit => fit,
-                            Zoom::Factor(v) => v,
-                        };
-                        s.zoom = Zoom::Factor(f(cur).clamp(0.02, 32.));
+                        let to = s.scale() * by;
+                        s.zoom_at(to, None);
                     }
                     cx.notify();
                 }))
-            };
+        };
         let toolbar = div()
             .flex()
             .flex_shrink_0()
@@ -672,26 +858,32 @@ impl MediaView {
             .bg(p.panel)
             .border_b_1()
             .border_color(p.border)
-            .child(zoom_btn("zoom-out", "zoom-out", cx, |z| z / 1.25))
-            .child(zoom_btn("zoom-in", "zoom-in", cx, |z| z * 1.25))
+            .child(step("zoom-out", "−", "Zoom Out", 1. / 1.25))
+            .child(step("zoom-in", "+", "Zoom In", 1.25))
+            .child(
+                (if is_100 {
+                    primary_button("zoom-100", "100%", p)
+                } else {
+                    button("zoom-100", "100%", p)
+                })
+                .tooltip("Actual Size")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Content::Image(s) = &mut this.content {
+                        s.zoom_at(1.0, None);
+                    }
+                    cx.notify();
+                })),
+            )
             .child(
                 (if is_fit {
                     primary_button("zoom-fit", "Fit", p)
                 } else {
                     button("zoom-fit", "Fit", p)
                 })
+                .tooltip("Fit to the View")
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Content::Image(s) = &mut this.content {
                         s.zoom = Zoom::Fit;
-                        s.pan = Point::default();
-                    }
-                    cx.notify();
-                })),
-            )
-            .child(
-                button("zoom-100", "100%", p).on_click(cx.listener(|this, _, _, cx| {
-                    if let Content::Image(s) = &mut this.content {
-                        s.zoom = Zoom::Factor(1.0);
                         s.pan = Point::default();
                     }
                     cx.notify();
@@ -745,12 +937,6 @@ impl MediaView {
             })
             // Animation state (the GIF frame) lives in the element's state, which needs an id.
             .id("media-picture");
-        if failed {
-            return self.render_failed(
-                "This image file is damaged or cannot be decoded.".to_string(),
-                cx,
-            );
-        }
         div()
             .size_full()
             .flex()
@@ -765,47 +951,50 @@ impl MediaView {
                     .min_h_0()
                     .w_full()
                     .overflow_hidden()
-                    .when(zoomed_in, |d| d.cursor_grab())
-                    .on_scroll(cx.listener(move |this, ev: &ScrollEvent, _, cx| {
+                    .when(movable && !dragging, |d| d.cursor_grab())
+                    .when(dragging, |d| d.cursor_grabbing())
+                    // Wheel: up and down. Alt (Option) + wheel: sideways. Ctrl (or
+                    // Cmd) + wheel: zoom around the pointer. A trackpad's two-finger
+                    // moves come as both axes at once.
+                    .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| {
                         let Content::Image(s) = &mut this.content else {
                             return;
                         };
-                        let delta = ev.delta.pixel_delta(px(20.));
-                        if ev.modifiers.platform || ev.modifiers.control {
-                            let cur = match s.zoom {
-                                Zoom::Fit => fit,
-                                Zoom::Factor(v) => v,
-                            };
-                            s.zoom = Zoom::Factor(
-                                (cur * (1. + f32::from(delta.y) * 0.005)).clamp(0.02, 32.),
-                            );
+                        let d = ev.delta.pixel_delta(px(40.));
+                        if ev.modifiers.control || ev.modifiers.platform {
+                            // One notch of a mouse wheel is about 10%.
+                            let by = (f32::from(d.y) * 0.0025).exp();
+                            let to = s.scale() * by;
+                            s.zoom_at(to, Some(ev.position));
+                        } else if ev.modifiers.alt {
+                            s.pan.x += if d.x == px(0.) { d.y } else { d.x };
                         } else {
-                            s.pan += delta;
+                            s.pan += d;
                         }
+                        s.clamp_pan();
+                        cx.stop_propagation();
                         cx.notify();
+                    }))
+                    .on_pinch(cx.listener(|this, ev: &PinchEvent, _, cx| {
+                        if let Content::Image(s) = &mut this.content {
+                            let to = s.scale() * (1. + ev.delta);
+                            s.zoom_at(to, Some(ev.position));
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
                     }))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, ev: &MouseDownEvent, _, _| {
+                        cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                             if let Content::Image(s) = &mut this.content {
                                 s.last_drag = Some(ev.position);
-                            }
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, _| {
-                            if let Content::Image(s) = &mut this.content {
-                                s.last_drag = None;
+                                cx.notify();
                             }
                         }),
                     )
                     .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                        if let Content::Image(s) = &mut this.content
-                            && let (Some(last), true) = (s.last_drag, ev.dragging())
-                        {
-                            s.pan += ev.position - last;
-                            s.last_drag = Some(ev.position);
+                        if let Content::Image(s) = &mut this.content {
+                            drag_to(s, ev);
                             cx.notify();
                         }
                     }))
@@ -815,19 +1004,26 @@ impl MediaView {
                                 let entity = entity.clone();
                                 move |bounds, _, cx| {
                                     entity.update(cx, |this: &mut MediaView, cx| {
-                                        if let Content::Image(s) = &mut this.content
-                                            && s.view != bounds.size
-                                        {
-                                            s.view = bounds.size;
-                                            cx.notify();
+                                        if let Content::Image(s) = &mut this.content {
+                                            s.origin = bounds.origin;
+                                            if s.view != bounds.size {
+                                                s.view = bounds.size;
+                                                cx.notify();
+                                            }
                                         }
                                     });
                                     bounds
                                 }
                             },
-                            move |_, bounds, window, _| {
-                                if alpha {
-                                    paint_checker(bounds, left, top, dw, dh, p, window);
+                            {
+                                let entity = entity.clone();
+                                move |_, bounds, window, _| {
+                                    if alpha {
+                                        paint_checker(bounds, left, top, dw, dh, p, window);
+                                    }
+                                    if dragging {
+                                        follow_drag(&entity, bounds, window);
+                                    }
                                 }
                             },
                         )
@@ -839,7 +1035,7 @@ impl MediaView {
             .into_any_element()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     fn seek_from(&mut self, x: Pixels, cx: &mut Context<Self>) {
         if let Content::Video(v) = &mut self.content {
             let w = f32::from(v.bar.size.width);
@@ -852,10 +1048,47 @@ impl MediaView {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
+    fn volume_from(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        if let Content::Video(v) = &mut self.content {
+            let w = f32::from(v.volume_bar.size.width);
+            if w > 0. {
+                v.player.set_muted(false);
+                v.player
+                    .set_volume((f32::from(x - v.volume_bar.origin.x) / w).clamp(0., 1.));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Space, the arrows, F and Esc while the player has the focus. Anything
+    /// else (and these keys anywhere else) keeps its usual meaning.
+    #[cfg(any(target_os = "macos", windows))]
+    fn player_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let m = &ev.keystroke.modifiers;
+        if m.control || m.platform || m.alt || m.function {
+            return;
+        }
+        let Content::Video(v) = &mut self.content else {
+            return;
+        };
+        match ev.keystroke.key.as_str() {
+            "space" => v.toggle_play(),
+            "left" => v.skip(-SKIP_SECONDS),
+            "right" => v.skip(SKIP_SECONDS),
+            "f" => v.fullscreen = !v.fullscreen,
+            "escape" if v.fullscreen => v.fullscreen = false,
+            _ => return,
+        }
+        v.last_motion = Instant::now();
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
     fn render_video(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let p = pal(cx);
         let entity = cx.entity();
+        let focus = self.focus.clone();
         let Content::Video(v) = &mut self.content else {
             return div().into_any_element();
         };
@@ -863,202 +1096,389 @@ impl MediaView {
         let muted = v.player.muted();
         let volume = v.player.volume();
         let (cur, dur) = (v.current, v.duration);
-        let frame = v.frame.clone();
+        let fullscreen = v.fullscreen;
+        let sliding = v.scrubbing || v.volume_dragging;
+        let show_controls = v.controls_wanted();
+        v.controls_shown = show_controls;
         let progress = if dur > 0. {
             (cur / dur).clamp(0., 1.) as f32
         } else {
             0.
         };
-        let vol_fill = if muted { 0. } else { volume };
-        let e1 = entity.clone();
-        let e2 = entity.clone();
-        let track = |id: &'static str, fill: f32| {
+        let vol_fill = if muted { 0. } else { volume.clamp(0., 1.) };
+        let picture = v.frame.clone().map(|f| {
+            #[cfg(target_os = "macos")]
+            let el = surface(f).object_fit(ObjectFit::Contain).size_full();
+            #[cfg(windows)]
+            let el = img(ImageSource::Render(f))
+                .object_fit(ObjectFit::Contain)
+                .size_full();
+            el.into_any_element()
+        });
+
+        // The player looks the same in every theme: light controls on black.
+        let white = gpui_kit::white();
+        let accent = pal(cx).accent_fill;
+        let player_button = |id: &'static str, name: &'static str, hint: String| {
+            div()
+                .id(id)
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .size(px(30.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(|s| s.bg(white.opacity(0.14)))
+                .child(icon(name).with_size(px(18.)).text_color(white))
+                .tooltip(super::widgets::tip(hint))
+        };
+        let slider = |id: &'static str, fill: f32, height: f32| {
             div()
                 .id(id)
                 .relative()
-                .h(px(16.))
+                .h(px(14.))
+                .w_full()
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                .child(div().h(px(4.)).w_full().rounded(px(2.)).bg(p.active))
+                .child(
+                    div()
+                        .h(px(height))
+                        .w_full()
+                        .rounded(px(2.))
+                        .bg(white.opacity(0.3)),
+                )
                 .child(
                     div()
                         .absolute()
                         .left_0()
-                        .h(px(4.))
+                        .h(px(height))
                         .w(relative(fill))
                         .rounded(px(2.))
-                        .bg(p.accent_fill),
+                        .bg(accent),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(relative(fill))
+                        .ml(px(-6.))
+                        .size(px(12.))
+                        .rounded_full()
+                        .bg(white),
                 )
         };
+        let bounds_probe = |which: u8| {
+            let e = entity.clone();
+            canvas(
+                move |b, _, cx| {
+                    e.update(cx, |this: &mut MediaView, _| {
+                        if let Content::Video(v) = &mut this.content {
+                            if which == 0 {
+                                v.bar = b;
+                            } else {
+                                v.volume_bar = b;
+                            }
+                        }
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
+        let seek_bar = div().w_full().px_3().pt_1().child(
+            slider("vid-seek", progress, 4.)
+                .child(bounds_probe(0))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                        if let Content::Video(v) = &mut this.content {
+                            v.scrubbing = true;
+                        }
+                        this.seek_from(ev.position.x, cx);
+                        cx.stop_propagation();
+                    }),
+                ),
+        );
+        let row = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(38.))
+            .px_2()
+            .child(
+                player_button(
+                    "vid-play",
+                    if playing { "pause" } else { "play" },
+                    format!("{} (Space)", if playing { "Pause" } else { "Play" }),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Content::Video(v) = &this.content {
+                        v.toggle_play();
+                    }
+                    cx.notify();
+                })),
+            )
+            .child(
+                player_button(
+                    "vid-mute",
+                    if muted || volume == 0. {
+                        "volume-x"
+                    } else if volume < 0.5 {
+                        "volume-1"
+                    } else {
+                        "volume-2"
+                    },
+                    if muted { "Unmute" } else { "Mute" }.to_string(),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Content::Video(v) = &this.content {
+                        v.player.set_muted(!v.player.muted());
+                    }
+                    cx.notify();
+                })),
+            )
+            .child(
+                div().w(px(88.)).px(px(6.)).flex_shrink_0().child(
+                    slider("vid-vol", vol_fill, 3.)
+                        .child(bounds_probe(1))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                if let Content::Video(v) = &mut this.content {
+                                    v.volume_dragging = true;
+                                }
+                                this.volume_from(ev.position.x, cx);
+                                cx.stop_propagation();
+                            }),
+                        ),
+                ),
+            )
+            .child(
+                div()
+                    .ml_2()
+                    .flex_shrink_0()
+                    .text_size(px(12.))
+                    .font_family(crate::core::settings::MONO_FONT)
+                    .text_color(white)
+                    .child(format!("{} / {}", clock(cur), clock(dur))),
+            )
+            .child(div().flex_1())
+            .child(
+                player_button(
+                    "vid-fullscreen",
+                    if fullscreen {
+                        "minimize-2"
+                    } else {
+                        "maximize-2"
+                    },
+                    if fullscreen {
+                        "Exit Full Screen (Esc)".to_string()
+                    } else {
+                        "Full Screen (F)".to_string()
+                    },
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    let on = !this.is_fullscreen();
+                    this.set_fullscreen(on, cx);
+                    window.focus(&this.focus, cx);
+                })),
+            );
+        let controls = div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .w_full()
+            .bg(if fullscreen {
+                gpui_kit::black().opacity(0.6)
+            } else {
+                hsla(0., 0., 0.09, 1.)
+            })
+            .child(seek_bar)
+            .child(row);
+        let area = div()
+            .id("video-area")
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(fullscreen, |d| d.absolute().inset_0())
+            .when(!fullscreen, |d| d.flex_1().min_h_0().w_full())
+            .on_click(cx.listener(|this, ev: &ClickEvent, _, cx| {
+                if let Content::Video(v) = &mut this.content {
+                    // A double click goes full screen, as in web players; its
+                    // first click already toggled playback, the second undoes it.
+                    v.toggle_play();
+                    if ev.click_count() == 2 {
+                        v.fullscreen = !v.fullscreen;
+                    }
+                    v.last_motion = Instant::now();
+                }
+                cx.notify();
+            }))
+            .children(picture);
         div()
+            .id("video-player")
+            .key_context("KernMedia")
+            .track_focus(&focus)
+            .relative()
             .size_full()
             .flex()
             .flex_col()
             .bg(gpui_kit::black())
-            .on_mouse_up(
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| this.player_key(ev, cx)))
+            .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| {
-                    if let Content::Video(v) = &mut this.content {
-                        v.scrubbing = false;
-                    }
-                }),
+                cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)),
             )
-            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                let scrubbing = matches!(&this.content, Content::Video(v) if v.scrubbing);
-                if scrubbing && ev.dragging() {
-                    this.seek_from(ev.position.x, cx);
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| {
+                if let Content::Video(v) = &mut this.content {
+                    v.last_motion = Instant::now();
+                    if !v.controls_shown {
+                        cx.notify();
+                    }
                 }
             }))
-            .child(
-                div()
-                    .id("video-area")
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Content::Video(v) = &this.content {
-                            if v.player.is_playing() {
-                                v.player.pause()
-                            } else {
-                                v.player.play()
-                            }
-                        }
-                        cx.notify();
-                    }))
-                    .when_some(frame, |d, f| {
-                        d.child(surface(f).object_fit(ObjectFit::Contain).size_full())
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap_2()
-                    .h(px(36.))
-                    .px_3()
-                    .bg(p.panel)
-                    .border_t_1()
-                    .border_color(p.border)
-                    .child(
-                        icon_button(
-                            "vid-play",
-                            if playing { "pause" } else { "play" },
-                            if playing { "Pause" } else { "Play" },
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Content::Video(v) = &this.content {
-                                if v.player.is_playing() {
-                                    v.player.pause()
-                                } else {
-                                    v.player.play()
-                                }
-                            }
-                            cx.notify();
-                        })),
+            .when(sliding, |d| {
+                let e = entity.clone();
+                d.child(
+                    canvas(
+                        |_, _, _| {},
+                        move |_, _, window, _| follow_slider(&e, window),
                     )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(px(11.))
-                            .font_family(crate::core::settings::MONO_FONT)
-                            .text_color(p.fg)
-                            .child(format!("{} / {}", clock(cur), clock(dur))),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_w(px(60.))
-                            .child(track("vid-seek", progress).on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
-                                    if let Content::Video(v) = &mut this.content {
-                                        v.scrubbing = true;
-                                    }
-                                    this.seek_from(ev.position.x, cx);
-                                }),
-                            ))
-                            .child(
-                                canvas(
-                                    move |b, _, cx| {
-                                        e1.update(cx, |this: &mut MediaView, _| {
-                                            if let Content::Video(v) = &mut this.content {
-                                                v.bar = b;
-                                            }
-                                        });
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .inset_0(),
-                            ),
-                    )
-                    .child(
-                        icon_button(
-                            "vid-mute",
-                            if muted { "volume-x" } else { "volume-2" },
-                            if muted { "Unmute" } else { "Mute" },
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Content::Video(v) = &this.content {
-                                v.player.set_muted(!v.player.muted());
-                            }
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .w(px(80.))
-                            .flex_shrink_0()
-                            .child(track("vid-vol", vol_fill).on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
-                                    if let Content::Video(v) = &this.content {
-                                        let w = f32::from(v.volume_bar.size.width);
-                                        if w > 0. {
-                                            v.player.set_muted(false);
-                                            v.player.set_volume(
-                                                f32::from(ev.position.x - v.volume_bar.origin.x)
-                                                    / w,
-                                            );
-                                        }
-                                    }
-                                    cx.notify();
-                                }),
-                            ))
-                            .child(
-                                canvas(
-                                    move |b, _, cx| {
-                                        e2.update(cx, |this: &mut MediaView, _| {
-                                            if let Content::Video(v) = &mut this.content {
-                                                v.volume_bar = b;
-                                            }
-                                        });
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .inset_0(),
-                            ),
-                    ),
-            )
+                    .absolute()
+                    .size_0(),
+                )
+            })
+            .child(area)
+            .map(|d| match (fullscreen, show_controls) {
+                (false, _) => d.child(controls),
+                (true, true) => d.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .child(controls),
+                ),
+                (true, false) => d,
+            })
             .into_any_element()
     }
 }
 
-#[cfg(target_os = "macos")]
-fn clock(sec: f64) -> String {
-    let s = sec.max(0.) as u64;
-    format!("{}:{:02}", s / 60, s % 60)
+impl Focusable for MediaView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
 }
 
-/// A checkerboard under the visible part of the picture, showing transparency.
+/// Where something is in the window, "x,y,w,h", for tests that click it from outside.
+#[cfg(feature = "autotest")]
+fn rect(b: Bounds<Pixels>) -> String {
+    format!(
+        "{:.0},{:.0},{:.0},{:.0}",
+        f32::from(b.origin.x),
+        f32::from(b.origin.y),
+        f32::from(b.size.width),
+        f32::from(b.size.height)
+    )
+}
+
+/// One step of dragging the picture with the mouse.
+fn drag_to(s: &mut ImageState, ev: &MouseMoveEvent) {
+    let Some(last) = s.last_drag else {
+        return;
+    };
+    if ev.dragging() {
+        s.pan += ev.position - last;
+        s.last_drag = Some(ev.position);
+        s.clamp_pan();
+    } else {
+        s.last_drag = None;
+    }
+}
+
+/// While a picture is dragged, the mouse is followed over the whole window: the
+/// drag goes on when the pointer leaves the picture and ends wherever the button
+/// is released.
+fn follow_drag(entity: &Entity<MediaView>, area: Bounds<Pixels>, window: &mut Window) {
+    let e = entity.clone();
+    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+        // Over the picture its own listener has it.
+        if phase != DispatchPhase::Bubble || area.contains(&ev.position) {
+            return;
+        }
+        e.update(cx, |this, cx| {
+            if let Content::Image(s) = &mut this.content {
+                drag_to(s, ev);
+                cx.notify();
+            }
+        });
+    });
+    let e = entity.clone();
+    window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+        if phase == DispatchPhase::Bubble {
+            e.update(cx, |this, cx| {
+                if let Content::Image(s) = &mut this.content {
+                    s.last_drag = None;
+                    cx.notify();
+                }
+            });
+        }
+    });
+}
+
+/// The same for the player's sliders: seeking and the volume follow the mouse
+/// anywhere in the window until the button is released.
+#[cfg(any(target_os = "macos", windows))]
+fn follow_slider(entity: &Entity<MediaView>, window: &mut Window) {
+    let e = entity.clone();
+    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+        if phase != DispatchPhase::Bubble {
+            return;
+        }
+        e.update(cx, |this, cx| {
+            let Content::Video(v) = &mut this.content else {
+                return;
+            };
+            v.last_motion = Instant::now();
+            let (scrub, vol) = (v.scrubbing, v.volume_dragging);
+            if !ev.dragging() {
+                v.scrubbing = false;
+                v.volume_dragging = false;
+                cx.notify();
+            } else if scrub {
+                this.seek_from(ev.position.x, cx);
+            } else if vol {
+                this.volume_from(ev.position.x, cx);
+            }
+        });
+    });
+    let e = entity.clone();
+    window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+        if phase == DispatchPhase::Bubble {
+            e.update(cx, |this, cx| {
+                if let Content::Video(v) = &mut this.content {
+                    v.scrubbing = false;
+                    v.volume_dragging = false;
+                    cx.notify();
+                }
+            });
+        }
+    });
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn clock(sec: f64) -> String {
+    let s = sec.max(0.) as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
 fn paint_checker(
     bounds: Bounds<Pixels>,
     left: f32,
@@ -1198,8 +1618,16 @@ fn probe_image(path: &Path, kind: MediaKind) -> Result<Probed, String> {
 }
 
 impl Render for MediaView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
+        // Replaced video frames leave the GPU atlas, or every frame would stay there.
+        #[cfg(windows)]
+        if let Content::Video(v) = &mut self.content {
+            for old in v.retired.drain(..) {
+                let _ = window.drop_image(old);
+            }
+        }
+        let _ = &window;
         match &self.content {
             Content::Loading => div().size_full().bg(p.editor).into_any_element(),
             Content::Failed(msg) => {
@@ -1208,7 +1636,7 @@ impl Render for MediaView {
             }
             Content::Image(_) => self.render_image(cx),
             Content::Archive { .. } | Content::Binary(_) => self.render_contents(cx),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Content::Video(_) => self.render_video(cx),
         }
     }

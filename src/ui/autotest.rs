@@ -356,6 +356,144 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
                     })
                     .map_err(|e| e.to_string())
                 }
+                "drag" => {
+                    async {
+                        // drag x1 y1 x2 y2: press, move in steps a frame apart, release.
+                        let n: Vec<f32> = arg.split(' ').filter_map(|v| v.parse().ok()).collect();
+                        let (from, to) = (point(px(n[0]), px(n[1])), point(px(n[2]), px(n[3])));
+                        let send = |e: PlatformInput, cx: &mut AsyncWindowContext| {
+                            cx.update(|w, cx| {
+                                w.dispatch_event(e, cx);
+                            })
+                            .map_err(|e| e.to_string())
+                        };
+                        send(
+                            PlatformInput::MouseDown(MouseDownEvent {
+                                button: MouseButton::Left,
+                                position: from,
+                                modifiers: Modifiers::default(),
+                                click_count: 1,
+                                first_mouse: false,
+                            }),
+                            cx,
+                        )?;
+                        for i in 1..=8 {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(20))
+                                .await;
+                            send(
+                                PlatformInput::MouseMove(MouseMoveEvent {
+                                    position: from + (to - from) * (i as f32 / 8.),
+                                    pressed_button: Some(MouseButton::Left),
+                                    modifiers: Modifiers::default(),
+                                }),
+                                cx,
+                            )?;
+                        }
+                        cx.background_executor()
+                            .timer(Duration::from_millis(20))
+                            .await;
+                        send(
+                            PlatformInput::MouseUp(MouseUpEvent {
+                                button: MouseButton::Left,
+                                position: to,
+                                modifiers: Modifiers::default(),
+                                click_count: 1,
+                            }),
+                            cx,
+                        )?;
+                        Ok::<String, String>(String::new())
+                    }
+                    .await
+                }
+                "dblclick" => {
+                    let n: Vec<f32> = arg.split(' ').filter_map(|v| v.parse().ok()).collect();
+                    let position = point(px(n[0]), px(n[1]));
+                    cx.update(|w, cx| {
+                        for click_count in [1, 2] {
+                            w.dispatch_event(
+                                PlatformInput::MouseDown(MouseDownEvent {
+                                    button: MouseButton::Left,
+                                    position,
+                                    modifiers: Modifiers::default(),
+                                    click_count,
+                                    first_mouse: false,
+                                }),
+                                cx,
+                            );
+                            w.dispatch_event(
+                                PlatformInput::MouseUp(MouseUpEvent {
+                                    button: MouseButton::Left,
+                                    position,
+                                    modifiers: Modifiers::default(),
+                                    click_count,
+                                }),
+                                cx,
+                            );
+                        }
+                        String::new()
+                    })
+                    .map_err(|e| e.to_string())
+                }
+                "wheel" | "pinch" => {
+                    // wheel x y dx dy [ctrl alt cmd lines]: a mouse wheel (lines) or a
+                    // trackpad (pixels) at a point. pinch x y delta. drag x1 y1 x2 y2.
+                    // Logical pixels, through the window's hit testing.
+                    let parts: Vec<&str> = arg.split(' ').collect();
+                    let n = |i: usize| {
+                        parts
+                            .get(i)
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .unwrap_or(0.)
+                    };
+                    let flags = parts
+                        .get(4)
+                        .map(|_| parts[4..].join(" "))
+                        .unwrap_or_default();
+                    let modifiers = Modifiers {
+                        control: flags.contains("ctrl"),
+                        alt: flags.contains("alt"),
+                        platform: flags.contains("cmd"),
+                        ..Default::default()
+                    };
+                    let at = point(px(n(0)), px(n(1)));
+                    let kind = cmd.clone();
+                    cx.update(|w, cx| {
+                        match kind.as_str() {
+                            "wheel" => {
+                                let delta = if flags.contains("lines") {
+                                    ScrollDelta::Lines(point(n(2), n(3)))
+                                } else {
+                                    ScrollDelta::Pixels(point(px(n(2)), px(n(3))))
+                                };
+                                w.dispatch_event(
+                                    PlatformInput::Scroll(ScrollEvent {
+                                        position: at,
+                                        delta,
+                                        modifiers,
+                                        touch_phase: TouchPhase::Moved,
+                                        source: ScrollSource::Pointer,
+                                    }),
+                                    cx,
+                                );
+                            }
+                            "pinch" => {
+                                w.dispatch_event(
+                                    PlatformInput::Pinch(PinchEvent {
+                                        position: at,
+                                        delta: n(2),
+                                        modifiers,
+                                        phase: TouchPhase::Moved,
+                                    }),
+                                    cx,
+                                );
+                            }
+                            _ => {}
+                        }
+                        String::new()
+                    })
+                    .map_err(|e| e.to_string())
+                }
                 "shell" => {
                     let script = arg.clone();
                     cx.background_spawn(async move {
@@ -579,6 +717,15 @@ impl KernApp {
                 e.update(cx, |e, cx| e.set_cursor_position(pos, w, cx));
             }
             "focus" => match arg {
+                "media" => {
+                    let p = self.project.as_ref().ok_or("no project")?;
+                    let tab = p.active.and_then(|a| p.tabs.get(a)).ok_or("no tab")?;
+                    let super::editor_area::Tab::Media(m, _) = tab else {
+                        return Err("not media".into());
+                    };
+                    let f = m.read(cx).focus_handle(cx);
+                    w.focus(&f, cx);
+                }
                 "editor" => {
                     let e = self.at_active_editor()?;
                     e.update(cx, |e, cx| e.focus(w, cx));
@@ -1622,6 +1769,15 @@ impl KernApp {
                 );
                 ok(s.contains(arg), s)
             }
+            #[cfg(any(target_os = "macos", windows))]
+            "videoplayers" => {
+                let n = crate::platform::video::live_players();
+                ok(n.to_string() == arg, format!("{n} players"))
+            }
+            "windowfullscreen" => ok(
+                _w.is_fullscreen() == (arg == "1"),
+                format!("fullscreen={}", _w.is_fullscreen()),
+            ),
             "termfocused" => {
                 let t = self.at_terminal()?;
                 ok(t.read(cx).is_focused(_w), "not focused".into())
@@ -1872,7 +2028,9 @@ impl KernApp {
                     return Err("not media".into());
                 };
                 let s = m.read(cx).describe();
-                ok(s.contains(arg), s)
+                // The state goes to the log either way: zoom and pan are numbers
+                // worth reading back.
+                if s.contains(arg) { Ok(s) } else { Err(s) }
             }
             "mediatab" => {
                 let (name, want) = arg.split_once('|').ok_or("mediatab name|text")?;

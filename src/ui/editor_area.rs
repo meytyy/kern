@@ -829,6 +829,10 @@ impl KernApp {
         let p = self.project.as_ref().expect("project");
         let body: AnyElement = match active.and_then(|a| p.tabs.get(a)) {
             _ if special_body.is_some() => special_body.expect("checked"),
+            // A full-screen video is drawn over the whole window instead.
+            Some(Tab::Media(m, _)) if m.read(cx).is_fullscreen() => {
+                div().size_full().bg(gpui_kit::black()).into_any_element()
+            }
             Some(Tab::Media(m, _)) => div()
                 .key_context("KernEditor")
                 .size_full()

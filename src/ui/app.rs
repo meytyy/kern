@@ -97,6 +97,9 @@ pub struct KernApp {
     pub updates: updates::UpdateState,
     /// The parameter hint shown above the caret while typing a call.
     pub signature: Option<signature::SignatureHint>,
+    /// A video is full screen: whether KERN made the window full screen for it
+    /// (and so undoes that), and since when.
+    pub video_fullscreen: Option<(bool, std::time::Instant)>,
     /// The menu bar drawn in the title bar (Windows).
     pub menu_bar: Option<Entity<gpui_kit::component::menu::AppMenuBar>>,
     pub claude_key_input: Entity<gpui_kit::component::input::InputState>,
@@ -172,6 +175,7 @@ impl KernApp {
             login_view: None,
             updates: Default::default(),
             signature: None,
+            video_fullscreen: None,
             menu_bar: in_window_menu().then(|| gpui_kit::component::menu::AppMenuBar::new(cx)),
             claude_key_input,
         };
@@ -1237,6 +1241,7 @@ impl Render for KernApp {
         let toast = self.render_toast(cx);
         let update_notice = self.render_update_notice(cx);
         let signature = self.render_signature(window, cx);
+        let fullscreen_video = self.sync_video_fullscreen(window, cx);
         div()
             .id("kern-root")
             .key_context("KernApp")
@@ -1359,6 +1364,55 @@ impl Render for KernApp {
             .children(update_notice)
             .children(overlay)
             .children(toast)
+            .when_some(fullscreen_video, |d, v| {
+                d.child(div().absolute().inset_0().child(v))
+            })
+    }
+}
+
+impl KernApp {
+    /// The active tab's video, if it is full screen. The window follows: it
+    /// goes full screen with the video and back when the video leaves it (or
+    /// its tab closes); if the window leaves full screen some other way, the
+    /// video does too.
+    fn sync_video_fullscreen(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<super::media::MediaView>> {
+        let video =
+            self.project
+                .as_ref()
+                .and_then(|p| match p.active.and_then(|a| p.tabs.get(a)) {
+                    Some(super::editor_area::Tab::Media(m, _)) if m.read(cx).is_fullscreen() => {
+                        Some(m.clone())
+                    }
+                    _ => None,
+                });
+        match (&video, self.video_fullscreen) {
+            (Some(_), None) => {
+                let toggled = !window.is_fullscreen();
+                if toggled {
+                    window.toggle_fullscreen();
+                }
+                self.video_fullscreen = Some((toggled, std::time::Instant::now()));
+            }
+            (None, Some((toggled, _))) => {
+                if toggled && window.is_fullscreen() {
+                    window.toggle_fullscreen();
+                }
+                self.video_fullscreen = None;
+            }
+            (Some(v), Some((true, since)))
+                if !window.is_fullscreen() && since.elapsed().as_millis() > 1500 =>
+            {
+                v.update(cx, |v, cx| v.set_fullscreen(false, cx));
+                self.video_fullscreen = None;
+                return None;
+            }
+            _ => {}
+        }
+        video
     }
 }
 

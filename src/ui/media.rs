@@ -114,6 +114,9 @@ struct ImageState {
     view: Size<Pixels>,
     origin: Point<Pixels>,
     decode_failed: bool,
+    /// Scroll events the picture received and the last one (tests).
+    scrolls: u32,
+    last_scroll: String,
 }
 
 impl ImageState {
@@ -303,6 +306,8 @@ impl MediaView {
                         view: size(px(0.), px(0.)),
                         origin: Point::default(),
                         decode_failed: false,
+                        scrolls: 0,
+                        last_scroll: String::new(),
                     }),
                     Err(e) => Content::Failed(e),
                 };
@@ -470,7 +475,7 @@ impl MediaView {
             Content::Failed(e) => format!("failed: {e}"),
             Content::Archive { .. } | Content::Binary(_) => self.summary(),
             Content::Image(i) => format!(
-                "image {:?} {} failed={} note={:?} zoom={:.0}% fit={} pan={:.0},{:.0} area={}",
+                "image {:?} {} failed={} note={:?} zoom={:.0}% fit={} pan={:.0},{:.0} scrolls={} last={} area={}",
                 i.size,
                 i.format,
                 i.decode_failed,
@@ -479,6 +484,8 @@ impl MediaView {
                 i.zoom == Zoom::Fit,
                 f32::from(i.pan.x) + 0.,
                 f32::from(i.pan.y) + 0.,
+                i.scrolls,
+                i.last_scroll,
                 rect(Bounds::new(i.origin, i.view))
             ),
             #[cfg(any(target_os = "macos", windows))]
@@ -960,6 +967,15 @@ impl MediaView {
                         let Content::Image(s) = &mut this.content else {
                             return;
                         };
+                        s.scrolls += 1;
+                        s.last_scroll = format!(
+                            "{:?}{}{}{}",
+                            ev.delta,
+                            if ev.modifiers.control { "+ctrl" } else { "" },
+                            if ev.modifiers.alt { "+alt" } else { "" },
+                            if ev.modifiers.shift { "+shift" } else { "" }
+                        )
+                        .replace(' ', "");
                         let d = ev.delta.pixel_delta(px(40.));
                         if ev.modifiers.control || ev.modifiers.platform {
                             // One notch of a mouse wheel is about 10%.

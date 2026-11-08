@@ -11,3 +11,6 @@ pub use windows::*;
 pub mod tools;
 #[cfg(target_os = "macos")]
 pub mod video;
+#[cfg(windows)]
+#[path = "video_windows.rs"]
+pub mod video;

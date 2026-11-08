@@ -1,0 +1,29 @@
+name: Windows video decoding check
+
+# Decodes tests/fixtures/clip-h264-aac.mp4 with Media Foundation, without a
+# window: frames, size, clock and seeking.
+on:
+  workflow_dispatch:
+  push:
+    branches: [video-win]
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Media Foundation on this machine
+        run: |
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version
+          Get-WindowsFeature *Media* -ErrorAction SilentlyContinue | Format-Table Name, InstallState
+          Get-CimInstance Win32_SoundDevice | Select-Object Name, Status
+          Test-Path "$env:WINDIR\System32\mfplat.dll"; Test-Path "$env:WINDIR\System32\msmpeg2vdec.dll"
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
+          rustup default stable
+      - name: Decode the clip
+        run: cargo test --release --target x86_64-pc-windows-msvc plays_the_h264_aac_clip -- --nocapture

@@ -66,6 +66,9 @@ objc2-foundation = "0.3.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# Video: Media Foundation's Media Engine and WIC; the same version GPUI uses.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Imaging", "Win32_Media_MediaFoundation", "Win32_System_Com"] }
+windows-core = "0.62"
 
 [build-dependencies]
 embed-resource = "3"

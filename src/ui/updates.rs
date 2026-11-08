@@ -485,7 +485,7 @@ impl KernApp {
                 .id("update-notice")
                 .absolute()
                 .bottom(px(34.))
-                .right(px(12.))
+                .right(self.notice_right())
                 .w(px(320.))
                 .p_3()
                 .flex()

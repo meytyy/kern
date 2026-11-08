@@ -1,12 +1,12 @@
 # KERN
 
-Нативная IDE на Rust: редактор кода, поиск, терминал, запуск проектов, Git, GitHub, чат с Codex в правой панели, официальный Claude Code во вкладке терминала. Без Electron, WebView и HTML-интерфейса. Платформы: macOS на Apple Silicon (arm64) и Windows 11 x64. Версия 0.1.3.
+Нативная IDE на Rust: редактор кода, поиск, терминал, запуск проектов, Git, GitHub, чат с Codex в правой панели, официальный Claude Code во вкладке терминала. Без Electron, WebView и HTML-интерфейса. Платформы: macOS на Apple Silicon (arm64) и Windows 11 x64. Версия 0.1.4.
 
 ## Download
 
-**[Download for Windows (x64)](https://github.com/meytyy/kern/releases/download/v0.1.3/KERN-windows-x64-setup.exe)** · **[Download for macOS (Apple Silicon)](https://github.com/meytyy/kern/releases/download/v0.1.3/KERN-macos-arm64.zip)**
+**[Download for Windows (x64)](https://github.com/meytyy/kern/releases/download/v0.1.4/KERN-windows-x64-setup.exe)** · **[Download for macOS (Apple Silicon)](https://github.com/meytyy/kern/releases/download/v0.1.4/KERN-macos-arm64.zip)**
 
-Version 0.1.3. Both builds are unsigned: Windows SmartScreen and macOS Gatekeeper ask before the first start. On macOS, open KERN.app from the context menu (Open) or allow it in System Settings → Privacy & Security.
+Version 0.1.4. Both builds are unsigned: Windows SmartScreen and macOS Gatekeeper ask before the first start. On macOS, open KERN.app from the context menu (Open) or allow it in System Settings → Privacy & Security.
 
 Редактор, поиск, терминал и локальный Git работают без аккаунта и независимо от агентов.
 
@@ -117,13 +117,15 @@ open dist/KERN.app              # запуск как из Finder
 | Перенос строк | ⌥Z | Alt+Z |
 | Закрыть вкладку, новый файл | ⌘W, ⌘N | Ctrl+W, Ctrl+N |
 | Перейти к определению | F12 | F12 |
+| Format Document | ⇧⌥F | Shift+Alt+F |
+| Подсказки (Trigger Suggest) | ⌃Space | Ctrl+Space |
 | Run, Stop | ⌘R, ⌘. | Ctrl+R, Ctrl+. |
 | Боковая и нижняя панели | ⌘B, ⌘J | Ctrl+B, Ctrl+J |
 | Терминал | ⌃\` | Ctrl+\` |
 | Панель Codex | ⌥⌘C | Ctrl+Shift+A |
 | Extensions | ⇧⌘X | Ctrl+Shift+X |
 
-Сохранить, закрыть вкладку, новый файл и перенос строк работают только в редакторе. В терминале Tab уходит оболочке, а Ctrl+C без выделения прерывает команду; на Windows Ctrl+P/B/J/O/Q/R/./, при фокусе в терминале тоже достаются оболочке. В Settings Tab переходит между полями. На Windows ни одно сочетание не использует Ctrl+Alt: это AltGr.
+Сохранить, закрыть вкладку, новый файл, перенос строк, Format Document и Ctrl+Space работают только в редакторе. В терминале Tab уходит оболочке, а Ctrl+C без выделения прерывает команду; на Windows Ctrl+P/B/J/O/Q/R/./, при фокусе в терминале тоже достаются оболочке. В Settings Tab переходит между полями. На Windows ни одно сочетание не использует Ctrl+Alt: это AltGr.
 
 ## Языки
 
@@ -180,6 +182,10 @@ C# в `gpui-component` не было вовсе, поэтому `.cs` откры
 
 Word Wrap выключен по умолчанию: ⌥Z, команда, кнопка `Wrap` в строке состояния или Settings. Шрифт, размер, номера строк, таб, направляющие и активная строка настраиваются в **⌘, → Editor** и сразу применяются к открытым файлам.
 
+Подсказки идут от языкового сервера: список дополнений при вводе и по ⌃Space (вид, имя, документация; стрелки выбирают, Tab принимает, Esc закрывает, при закрытом списке Tab делает отступ), наведение показывает тип, документацию и текст ошибки, а при вводе аргументов над курсором видна сигнатура с текущим параметром. Без сервера подсветка работает, а KERN объясняет причину и ведёт в Settings → Languages (клик по статусу сервера внизу).
+
+**Format Document** (⇧⌥F, палитра, контекстное меню редактора) форматирует весь файл с несохранёнными правками через языковой сервер: rust-analyzer → rustfmt, TypeScript/Python и другие — их сервер, настройки проекта (`rustfmt.toml` и т.п.) читает сам сервер. Результат — один шаг Undo, курсор остаётся на том же коде, файл сохраняет свои LF или CRLF. Если форматтера нет, внизу короткая причина.
+
 ## Git Graph
 
 Внизу Source Control: цветные дорожки, развилки, слияния, метки веток и тегов, HEAD. Current Branch / All Branches, Fetch, Refresh, Copy Hash. История грузится по 200 коммитов вне UI-потока. Клик показывает сообщение, автора, дату, хеш и файлы; у merge-коммита видно, с каким родителем идёт сравнение, и родителя можно выбрать. Просмотр только читает репозиторий.
@@ -205,6 +211,8 @@ Word Wrap выключен по умолчанию: ⌥Z, команда, кно
 | SVG | да, внешние ссылки вырезаются и не загружаются |
 | MP4, MOV с кодеками macOS (H.264 проверен) | да: AVPlayer, кадры через `CVPixelBuffer` в раскладке GPUI |
 | WebM, AVI, MKV (проверенные образцы) | нет, понятное сообщение и Open With Default App |
+
+Архивы `.zip`, `.tar`, `.tar.gz`, `.tgz` открываются во вкладке только для чтения: тип, размер и список файлов. Список читается в фоне, не больше 5000 записей и 1 ГБ распакованных данных, ничего не распаковывается на диск; повреждённый архив показывает ошибку. Другие двоичные файлы показывают тип (по первым байтам) и размер, кнопки Open With Default App и Reveal in Finder / Show in File Explorer; те же действия есть в контекстном меню Explorer.
 
 Изображения: Fit, 100%, приближение, панорамирование, размеры, формат, шахматный фон. Видео открывается на паузе; при уходе со вкладки ставится на паузу, при закрытии плеер освобождается. Обрезанный JPEG показывается с предупреждением.
 
@@ -309,6 +317,7 @@ Tab обрабатывается по активной панели:
 | | macOS | Windows |
 |---|---|---|
 | Окно | системные кнопки macOS | свои кнопки Свернуть / Развернуть / Закрыть, перетаскивание, двойной клик и Snap через системный hit-test |
+| Шрифт терминала и кода по умолчанию | Menlo | Consolas: Menlo на Windows нет, а подставленный пропорциональный шрифт сдвигал курсор терминала вправо от текста |
 | Терминал | Unix PTY, оболочка из `$SHELL` | ConPTY (`alacritty_terminal`), по умолчанию `pwsh`, затем Windows PowerShell, затем `cmd.exe`; выбор в Settings → Terminal → Shell |
 | Копирование в терминале | ⌘C / ⌘V | Ctrl+C копирует выделение, без выделения прерывает команду; Ctrl+Shift+C/V, Ctrl+V |
 | Сочетания | ⌘ | Ctrl; панель Codex — Ctrl+Shift+A (Ctrl+Alt на Windows это AltGr). С фокусом в терминале Ctrl+P/B/J/O/Q/R/./, достаются оболочке |

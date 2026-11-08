@@ -241,7 +241,7 @@ pub fn code_text(text: impl Into<SharedString>, p: Palette) -> Div {
         .bg(p.editor)
         .border_1()
         .border_color(p.border)
-        .font_family("Menlo")
+        .font_family(crate::core::settings::MONO_FONT)
         .text_size(px(11.))
         .child(text)
 }
@@ -280,4 +280,11 @@ pub fn logo_image(size: f32) -> impl IntoElement {
         })
         .clone();
     img(image).size(px(size)).flex_shrink_0()
+}
+
+/// A tooltip for any element: `.tooltip(tip("Run (⌘R)"))`. It shows on hover,
+/// stays inside the window and never takes clicks or the focus.
+pub fn tip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text: SharedString = text.into();
+    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
 }

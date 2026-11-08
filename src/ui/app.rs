@@ -95,6 +95,8 @@ pub struct KernApp {
     )>,
     pub login_view: Option<Entity<terminal_view::TerminalView>>,
     pub updates: updates::UpdateState,
+    /// The parameter hint shown above the caret while typing a call.
+    pub signature: Option<signature::SignatureHint>,
     /// The menu bar drawn in the title bar (Windows).
     pub menu_bar: Option<Entity<gpui_kit::component::menu::AppMenuBar>>,
     pub claude_key_input: Entity<gpui_kit::component::input::InputState>,
@@ -169,6 +171,7 @@ impl KernApp {
             effort_slider: None,
             login_view: None,
             updates: Default::default(),
+            signature: None,
             menu_bar: in_window_menu().then(|| gpui_kit::component::menu::AppMenuBar::new(cx)),
             claude_key_input,
         };
@@ -834,6 +837,7 @@ impl KernApp {
         let p = pal(cx);
         let item = |id: &'static str,
                     name: &'static str,
+                    hint: String,
                     view: SideView,
                     this: &Self,
                     cx: &mut Context<Self>| {
@@ -853,6 +857,7 @@ impl KernApp {
                     17.,
                     if selected { p.accent } else { p.muted },
                 ))
+                .tooltip(tip(hint))
                 .on_click(cx.listener(move |this, _, w, cx| this.show_side(view, w, cx)))
         };
         div()
@@ -867,16 +872,38 @@ impl KernApp {
             .bg(p.bar)
             .border_r_1()
             .border_color(p.border)
-            .child(item("act-files", "folder", SideView::Files, self, cx))
-            .child(item("act-search", "search", SideView::Search, self, cx))
+            .child(item(
+                "act-files",
+                "folder",
+                "Explorer".into(),
+                SideView::Files,
+                self,
+                cx,
+            ))
+            .child(item(
+                "act-search",
+                "search",
+                format!("Search ({})", keys::FIND_IN_PROJECT.label()),
+                SideView::Search,
+                self,
+                cx,
+            ))
             .child(item(
                 "act-scm",
                 "git-branch",
+                "Source Control".into(),
                 SideView::SourceControl,
                 self,
                 cx,
             ))
-            .child(item("act-ext", "blocks", SideView::Extensions, self, cx))
+            .child(item(
+                "act-ext",
+                "blocks",
+                format!("Extensions ({})", keys::EXTENSIONS.label()),
+                SideView::Extensions,
+                self,
+                cx,
+            ))
             .child(div().flex_1())
             .child(
                 div()
@@ -944,7 +971,30 @@ impl KernApp {
                 let lsp_label = self.lsp_status_label(ft);
                 right.push(lsp_label.0.map_or_else(
                     || div().into_any_element(),
-                    |l| text(l, lsp_label.1.unwrap_or(p.muted)).into_any_element(),
+                    // Click: Settings → Languages, where servers are checked and set up.
+                    |l| {
+                        div()
+                            .id("status-lsp")
+                            .px_1()
+                            .rounded(px(3.))
+                            .cursor_pointer()
+                            .hover(move |st| st.bg(p.hover))
+                            .tooltip(|w, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "Language servers: open Settings → Languages",
+                                )
+                                .build(w, cx)
+                            })
+                            .on_click(cx.listener(|this, _, w, cx| {
+                                this.settings_form.category = settings_panel::Category::Languages;
+                                this.open_settings_tab(w, cx);
+                                if this.settings_form.probes.is_empty() {
+                                    this.run_tool_probes(cx);
+                                }
+                            }))
+                            .child(text(l, lsp_label.1.unwrap_or(p.muted)))
+                            .into_any_element()
+                    },
                 ));
                 right.push(text(ft.doc.format.label().to_string(), p.muted).into_any_element());
                 if ft.doc.format.bom {
@@ -1003,6 +1053,16 @@ impl KernApp {
             .children(right)
     }
 
+    /// Notices sit left of the Codex panel so its message field stays usable.
+    pub fn notice_right(&self) -> Pixels {
+        let l = &self.settings.layout;
+        if self.project.is_some() && l.codex_visible {
+            px(l.codex_width + 14.)
+        } else {
+            px(12.)
+        }
+    }
+
     fn render_toast(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let p = pal(cx);
         let (msg, error) = self.toast.clone()?;
@@ -1010,7 +1070,7 @@ impl KernApp {
             div()
                 .absolute()
                 .bottom(px(34.))
-                .right(px(12.))
+                .right(self.notice_right())
                 .max_w(px(520.))
                 .px_3()
                 .py_2()
@@ -1167,7 +1227,7 @@ impl Render for KernApp {
                 .flex_1()
                 .min_h_0()
                 .w_full()
-                .child(self.render_settings_tab(cx))
+                .child(self.render_settings_tab(window, cx))
                 .into_any_element()
         } else {
             self.render_start(cx).into_any_element()
@@ -1176,6 +1236,7 @@ impl Render for KernApp {
         let overlay = self.render_overlay(window, cx);
         let toast = self.render_toast(cx);
         let update_notice = self.render_update_notice(cx);
+        let signature = self.render_signature(window, cx);
         div()
             .id("kern-root")
             .key_context("KernApp")
@@ -1273,6 +1334,8 @@ impl Render for KernApp {
                 this.download_latest_manually(cx)
             }))
             .on_action(cx.listener(|this, _: &AboutKern, _, cx| this.show_about(cx)))
+            .on_action(cx.listener(|this, _: &FormatDocument, w, cx| this.format_document(w, cx)))
+            .on_action(cx.listener(|this, _: &TriggerSuggest, w, cx| this.trigger_suggest(w, cx)))
             .on_action(
                 cx.listener(|this, _: &GoToDefinitionHere, w, cx| this.go_to_definition(w, cx)),
             )
@@ -1292,6 +1355,7 @@ impl Render for KernApp {
             .child(top)
             .child(body)
             .child(status)
+            .children(signature)
             .children(update_notice)
             .children(overlay)
             .children(toast)

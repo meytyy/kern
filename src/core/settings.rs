@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// The monospaced font every platform has: Menlo on macOS, Consolas on Windows.
+pub const MONO_FONT: &str = if cfg!(windows) { "Consolas" } else { "Menlo" };
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeChoice {
@@ -32,7 +35,7 @@ pub struct EditorSettings {
 impl Default for EditorSettings {
     fn default() -> Self {
         Self {
-            font_family: "Menlo".into(),
+            font_family: MONO_FONT.into(),
             font_size: 13.0,
             line_numbers: true,
             word_wrap: false,
@@ -198,6 +201,11 @@ impl Settings {
         };
         match serde_json::from_str::<Self>(&text) {
             Ok(mut s) => {
+                // Menlo was the default everywhere, but Windows has no Menlo and
+                // substituted a proportional font: code and the terminal misaligned.
+                if cfg!(windows) && s.editor.font_family == "Menlo" {
+                    s.editor.font_family = MONO_FONT.into();
+                }
                 // Upgrading: integrations that already worked stay available.
                 if s.extensions.is_none() {
                     let on = ExtensionState {

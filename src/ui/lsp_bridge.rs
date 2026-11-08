@@ -89,6 +89,16 @@ impl CompletionProvider for LspProviders {
             let enc = client.encoding();
             let fix = |items: &mut Vec<lsp_types::CompletionItem>| {
                 for item in items.iter_mut() {
+                    // The menu shows `detail` beside the name: lead with the kind.
+                    if let Some(kind) = item.kind {
+                        let word = format!("{kind:?}")
+                            .to_lowercase()
+                            .replace("typeparameter", "type parameter");
+                        item.detail = Some(match item.detail.take() {
+                            Some(d) if !d.is_empty() => format!("{word} · {d}"),
+                            _ => word,
+                        });
+                    }
                     if let Some(edit) = &mut item.text_edit {
                         match edit {
                             lsp_types::CompletionTextEdit::Edit(e) => {
@@ -154,6 +164,9 @@ impl HoverProvider for LspProviders {
                 return Ok(None);
             }
             let mut hover: Hover = serde_json::from_value(value)?;
+            if let lsp_types::HoverContents::Markup(m) = &mut hover.contents {
+                m.value = plain_fences(&m.value);
+            }
             if let Some(r) = hover.range {
                 hover.range = Some(range_to_widget(&rope, r, client.encoding()));
             }
@@ -393,7 +406,7 @@ impl KernApp {
             }
             let items = result.get("items").cloned().unwrap_or(json!([]));
             this.update(cx, |this, cx| {
-                this.apply_diagnostics(&uri, items, cx);
+                this.apply_diagnostics(&uri, items, true, cx);
                 cx.notify();
             })
             .ok();
@@ -463,13 +476,22 @@ impl KernApp {
                 p.lsp_status.insert(server, status);
             }
             LspEvent::Diagnostics { uri, diagnostics } => {
-                self.apply_diagnostics(&uri, diagnostics, cx)
+                self.apply_diagnostics(&uri, diagnostics, false, cx)
             }
         }
         cx.notify();
     }
 
-    fn apply_diagnostics(&mut self, uri: &str, diagnostics: Value, cx: &mut Context<Self>) {
+    /// `pulled`: the answer to `textDocument/diagnostic`, otherwise a push.
+    /// rust-analyzer answers pulls with its own analysis only and pushes
+    /// cargo check's errors, so one must not wipe out the other.
+    fn apply_diagnostics(
+        &mut self,
+        uri: &str,
+        diagnostics: Value,
+        pulled: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(p) = &mut self.project else { return };
         let Some(path) = uri_to_path(uri) else { return };
         for t in &mut p.tabs {
@@ -478,8 +500,14 @@ impl KernApp {
                 continue;
             }
             let enc = f.lsp.as_ref().map(|c| c.encoding()).unwrap_or_default();
-            let items: Vec<lsp_types::Diagnostic> =
+            let incoming: Vec<lsp_types::Diagnostic> =
                 serde_json::from_value(diagnostics).unwrap_or_default();
+            if pulled {
+                f.pulled_diagnostics = incoming;
+            } else {
+                f.pushed_diagnostics = incoming;
+            }
+            let items = merge_diagnostics(&f.pushed_diagnostics, &f.pulled_diagnostics);
             let errors = items
                 .iter()
                 .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
@@ -513,6 +541,41 @@ impl KernApp {
     }
 }
 
+/// Code fences without their language: the hover's Markdown view draws the
+/// language over the top-right corner of the block, on top of a short
+/// signature such as `&'static str`.
+fn plain_fences(markdown: &str) -> String {
+    markdown
+        .lines()
+        .map(|l| {
+            let t = l.trim_start();
+            if t.starts_with("```") && t.len() > 3 && !t[3..].contains('`') {
+                &l[..l.len() - t.len() + 3]
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Both sets, without the entries a server reports through both channels.
+fn merge_diagnostics(
+    pushed: &[lsp_types::Diagnostic],
+    pulled: &[lsp_types::Diagnostic],
+) -> Vec<lsp_types::Diagnostic> {
+    let mut out = pushed.to_vec();
+    for d in pulled {
+        if !out
+            .iter()
+            .any(|o| o.range == d.range && o.message == d.message)
+        {
+            out.push(d.clone());
+        }
+    }
+    out
+}
+
 pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     lsp::uri_to_path(uri)
 }
@@ -520,6 +583,32 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn hover_fences_lose_the_language() {
+        assert_eq!(
+            plain_fences("```rust\nfn add(a: i32)\n```\n\n---\nAdds"),
+            "```\nfn add(a: i32)\n```\n\n---\nAdds"
+        );
+        assert_eq!(plain_fences("use ```x``` inline"), "use ```x``` inline");
+    }
+
+    #[::core::prelude::v1::test]
+    fn pulled_diagnostics_do_not_erase_pushed_ones() {
+        let d = |line: u32, msg: &str| {
+            serde_json::from_value::<lsp_types::Diagnostic>(serde_json::json!({
+                "range": {"start": {"line": line, "character": 0}, "end": {"line": line, "character": 3}},
+                "severity": 1, "message": msg
+            }))
+            .unwrap()
+        };
+        let pushed = vec![d(8, "mismatched types")];
+        assert_eq!(merge_diagnostics(&pushed, &[]).len(), 1);
+        let pulled = vec![d(8, "mismatched types"), d(2, "unused")];
+        let all = merge_diagnostics(&pushed, &pulled);
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|x| x.message == "unused"));
+    }
 
     #[::core::prelude::v1::test]
     fn converts_positions_against_rope_text() {

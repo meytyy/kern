@@ -11,6 +11,7 @@ pub mod extensions;
 pub mod file_icon_assets;
 pub mod file_icons;
 pub mod files;
+pub mod format;
 pub mod grammars;
 pub mod graph_panel;
 pub mod keys;
@@ -20,6 +21,7 @@ pub mod overlays;
 pub mod scm;
 pub mod search_panel;
 pub mod settings_panel;
+pub mod signature;
 pub mod start;
 pub mod terminal_view;
 pub mod theme;
@@ -72,7 +74,9 @@ gpui_kit::actions!(
         TreeLeft,
         TreeRight,
         TreeActivate,
-        CancelTreeEdit
+        CancelTreeEdit,
+        FormatDocument,
+        TriggerSuggest
     ]
 );
 
@@ -112,6 +116,9 @@ fn keymap(cx: &mut App) {
         KeyBinding::new("space", TreeActivate, Some("KernTree")),
         // The name field in the tree: Esc cancels, and the tree's own keys
         // (Space opens, arrows move) do not apply while typing a name.
+        // Editor only: the terminal and the Codex composer keep these keys.
+        KeyBinding::new(b(k::FORMAT_DOCUMENT), FormatDocument, Some("KernEditor")),
+        KeyBinding::new(b(k::TRIGGER_SUGGEST), TriggerSuggest, Some("KernEditor")),
         KeyBinding::new("escape", CancelTreeEdit, Some("KernTreeEdit")),
         KeyBinding::new("space", NoAction, Some("KernTreeEdit")),
         KeyBinding::new("up", NoAction, Some("KernTreeEdit")),

@@ -494,7 +494,7 @@ impl KernApp {
                 .text_size(px(12.))
                 .child(div().text_color(p.danger).child(format!("{} cannot run: {reason}", path.display())))
                 .child(div().text_color(p.muted).child("KERN does not bypass macOS warnings or run unknown copies. Repair it with the official installer:"))
-                .child(div().font_family("Menlo").text_color(p.accent).child(def.install))
+                .child(div().font_family(crate::core::settings::MONO_FONT).text_color(p.accent).child(def.install))
                 .into_any_element(),
             Some(Probe::Missing) => div()
                 .flex()
@@ -502,7 +502,7 @@ impl KernApp {
                 .gap_1()
                 .text_size(px(12.))
                 .child(div().text_color(p.warning).child(format!("The {} CLI is not installed. Install it with the official method:", def.cli)))
-                .child(div().font_family("Menlo").text_color(p.accent).child(def.install))
+                .child(div().font_family(crate::core::settings::MONO_FONT).text_color(p.accent).child(def.install))
                 .into_any_element(),
             None => div().text_size(px(12.)).text_color(p.muted).child("Checking the CLI…").into_any_element(),
         };

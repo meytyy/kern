@@ -766,6 +766,7 @@ fn explorer_menu(
         path.to_path_buf(),
         path.to_path_buf(),
     );
+    let p_open = path.to_path_buf();
     let reveal = if cfg!(target_os = "macos") {
         "Reveal in Finder"
     } else {
@@ -787,6 +788,13 @@ fn explorer_menu(
             PopupMenuItem::new(reveal).on_click(on(Box::new(move |t, _, cx| {
                 if let Err(e) = crate::platform::reveal(&p1) {
                     t.toast(format!("Cannot show it: {e}"), true, cx);
+                }
+            }))),
+        )
+        .item(
+            PopupMenuItem::new("Open with Default App").on_click(on(Box::new(move |t, _, cx| {
+                if let Err(e) = open::that_detached(&p_open) {
+                    t.toast(format!("Cannot open it: {e}"), true, cx);
                 }
             }))),
         )

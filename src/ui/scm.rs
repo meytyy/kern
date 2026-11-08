@@ -4,6 +4,7 @@ use super::theme::pal;
 use super::widgets::*;
 use super::*;
 use crate::git::{self, FileChange, RepoStatus};
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -22,6 +23,9 @@ pub struct GitState {
     pub refresh_running: bool,
     pub refresh_again: bool,
     pub graph: super::graph_panel::GraphState,
+    /// Collapsed sections of the change list.
+    pub staged_closed: bool,
+    pub changes_closed: bool,
 }
 
 impl GitState {
@@ -44,6 +48,8 @@ impl GitState {
             refresh_running: false,
             refresh_again: false,
             graph: Default::default(),
+            staged_closed: false,
+            changes_closed: false,
         }
     }
 }
@@ -468,9 +474,11 @@ impl KernApp {
                 change.state
             };
             let id = ix * 2 + is_staged as usize;
+            let full_path = change.path.clone();
             div()
                 .id(("chg", id))
                 .group("chg")
+                .tooltip(tip(full_path))
                 .h(px(24.))
                 .flex()
                 .items_center()
@@ -483,11 +491,15 @@ impl KernApp {
                     cx.listener(move |this, _, w, cx| this.show_file_diff(&c, is_staged, w, cx)),
                 )
                 .child(
+                    // Long names shorten too; the status and the button keep their place.
                     div()
-                        .flex_shrink_0()
+                        .flex_shrink(1.)
+                        .min_w(px(40.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .text_size(px(12.))
                         .text_color(palette.fg)
-                        .whitespace_nowrap()
                         .child(name),
                 )
                 .child(
@@ -504,6 +516,8 @@ impl KernApp {
                 .child(
                     div()
                         .w(px(14.))
+                        .flex_shrink_0()
+                        .text_center()
                         .text_size(px(11.))
                         .text_color(if state == git::status::FileState::Conflicted {
                             palette.danger
@@ -515,6 +529,12 @@ impl KernApp {
                 .child(
                     div()
                         .id(("chg-act", id))
+                        .flex_shrink_0()
+                        .tooltip(tip(if is_staged {
+                            "Unstage Changes"
+                        } else {
+                            "Stage Changes"
+                        }))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -531,19 +551,72 @@ impl KernApp {
                 )
                 .into_any_element()
         };
+        let (staged_closed, changes_closed) = (git.staged_closed, git.changes_closed);
+        let header = |id: &'static str, label: String, closed: bool, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap_1()
+                .h(px(ROW_H))
+                .pl_1()
+                .pr_3()
+                .cursor_pointer()
+                .hover(move |s| s.bg(palette.hover))
+                .tooltip(tip(if closed { "Expand" } else { "Collapse" }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(p) = &mut this.project {
+                        if id == "sec-staged" {
+                            p.git.staged_closed = !p.git.staged_closed;
+                        } else {
+                            p.git.changes_closed = !p.git.changes_closed;
+                        }
+                    }
+                    cx.notify();
+                }))
+                .child(icon_el(
+                    if closed {
+                        "chevron-right"
+                    } else {
+                        "chevron-down"
+                    },
+                    12.,
+                    palette.muted,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(palette.muted)
+                        .child(label),
+                )
+                .into_any_element()
+        };
         if !staged.is_empty() {
-            rows.push(
-                section_title(format!("STAGED ({})", staged.len()), palette).into_any_element(),
-            );
-            for (i, c) in staged.iter().enumerate() {
-                rows.push(row(c, true, i, cx));
+            rows.push(header(
+                "sec-staged",
+                format!("STAGED CHANGES ({})", staged.len()),
+                staged_closed,
+                cx,
+            ));
+            if !staged_closed {
+                for (i, c) in staged.iter().enumerate() {
+                    rows.push(row(c, true, i, cx));
+                }
             }
         }
-        rows.push(
-            section_title(format!("CHANGES ({})", changes.len()), palette).into_any_element(),
-        );
-        for (i, c) in changes.iter().enumerate() {
-            rows.push(row(c, false, i, cx));
+        rows.push(header(
+            "sec-changes",
+            format!("CHANGES ({})", changes.len()),
+            changes_closed,
+            cx,
+        ));
+        if !changes_closed {
+            for (i, c) in changes.iter().enumerate() {
+                rows.push(row(c, false, i, cx));
+            }
         }
         if changes.is_empty() && staged.is_empty() {
             rows.push(
@@ -648,7 +721,26 @@ impl KernApp {
                     .gap_1()
                     .px_2()
                     .py_1()
-                    .child(primary_button("scm-commit", format!("Commit {} staged", st.staged_count()), palette).on_click(cx.listener(|this, _, w, cx| this.git_commit(w, cx))))
+                    .child(
+                        primary_button("scm-commit", "Commit", palette)
+                            .disabled(staged.is_empty())
+                            .tooltip(if staged.is_empty() {
+                                "Stage files first: + beside a change".to_string()
+                            } else {
+                                format!("Commit {} staged file{}", staged.len(), if staged.len() == 1 { "" } else { "s" })
+                            })
+                            .on_click(cx.listener(|this, _, w, cx| this.git_commit(w, cx))),
+                    )
+                    .when(staged.is_empty() && !changes.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(11.))
+                                .text_color(palette.muted)
+                                .child("Stage files with + to commit"),
+                        )
+                    })
                     .child(div().flex_1())
                     .when(can_pr, |d| d.child(button("scm-pr", "Open Pull Request", palette).on_click(cx.listener(|this, _, _, cx| this.open_pull_request(cx))))),
             )

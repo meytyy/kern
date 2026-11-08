@@ -74,6 +74,9 @@ pub struct TerminalView {
     mouse_moved: bool,
     scroll_remainder: f32,
     last_size: Option<TermSize>,
+    /// On the cursor's row at the last paint: how far a drawn character starts
+    /// from its own cell, at most (pixels). The test driver checks it.
+    pub drift: Option<f32>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -111,11 +114,16 @@ impl TerminalView {
             mouse_moved: false,
             scroll_remainder: 0.,
             last_size: None,
+            drift: None,
         }
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.focus, cx);
+    }
+
+    pub fn cell_width(&self) -> Pixels {
+        self.cell.width
     }
 
     pub fn is_focused(&self, window: &Window) -> bool {
@@ -798,7 +806,7 @@ impl Render for TerminalView {
                         let entity = entity.clone();
                         move |bounds, window, cx| {
                             let font = Font {
-                                family: "Menlo".into(),
+                                family: crate::core::settings::MONO_FONT.into(),
                                 features: FontFeatures::disable_ligatures(),
                                 fallbacks: None,
                                 weight: FontWeight::NORMAL,
@@ -862,9 +870,10 @@ impl Render for TerminalView {
                             view.focus.is_focused(window),
                         );
                         let hovered = view.hovered_link.clone();
-                        paint_grid(
+                        let drift = paint_grid(
                             &session, origin, cell, font, &marked, focused, hovered, window, cx,
                         );
+                        entity.update(cx, |v, _| v.drift = Some(drift));
                     },
                 )
                 .size_full(),
@@ -914,9 +923,15 @@ fn paint_grid(
     hovered: Option<HoveredLink>,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> f32 {
     let p = pal(cx);
     let font_size = px(cx.global::<super::theme::TermPrefs>().font_size);
+    let mut drift = 0f32;
+    let cursor_row = {
+        let term = session.term.lock();
+        let c = term.renderable_content();
+        (c.cursor.point.line.0 + c.display_offset as i32).max(0) as usize
+    };
     let mut bg_rects: Vec<(usize, usize, usize, Hsla)> = vec![];
     let mut rows: Vec<Vec<Run>> = vec![];
     let cursor;
@@ -1016,7 +1031,36 @@ fn paint_grid(
             color,
         ));
     }
+    // Cells are as wide as the font's "M". With a monospaced font a run of text
+    // is exactly that many cells wide. If the font turns out proportional (a
+    // missing font replaced by the system), shaping a run would draw it narrower
+    // than its cells and the cursor would sit past the end of the text: then each
+    // character is drawn in its own cell.
+    let proportional = {
+        let ts = window.text_system();
+        let id = ts.resolve_font(&font);
+        let w = |c| ts.advance(id, font_size, c).map(|s| s.width).ok();
+        w('i') != w('M')
+    };
     for (row, runs) in rows.into_iter().enumerate() {
+        let runs: Vec<Run> = if proportional {
+            runs.into_iter()
+                .flat_map(|r| {
+                    let style = r.style;
+                    r.text
+                        .chars()
+                        .enumerate()
+                        .map(|(i, c)| Run {
+                            col: r.col + i,
+                            text: c.to_string(),
+                            style: style.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        } else {
+            runs
+        };
         for run in runs {
             let mut f = font.clone();
             if run.style.bold {
@@ -1040,9 +1084,19 @@ fn paint_grid(
                     color: Some(run.style.fg),
                 }),
             };
+            // Where the run's last character starts against where its cell is.
+            let (last_ix, cells) = run
+                .text
+                .char_indices()
+                .last()
+                .map_or((0, 0.), |(i, _)| (i, (run.text.chars().count() - 1) as f32));
             let line = window
                 .text_system()
                 .shape_line(run.text.into(), font_size, &[tr], None);
+            if row == cursor_row {
+                let start = line.x_for_index(last_ix);
+                drift = drift.max(f32::from(start - cell.width * cells).abs());
+            }
             let _ = line.paint(
                 at(row, run.col),
                 cell.height,
@@ -1104,4 +1158,5 @@ fn paint_grid(
             }
         }
     }
+    drift
 }

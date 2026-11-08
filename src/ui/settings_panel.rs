@@ -7,6 +7,7 @@ use super::*;
 use crate::core::settings::{CustomLsp, Settings, ThemeChoice};
 use crate::lang::{self, Highlight, LANGUAGES};
 use crate::platform::tools::{self, Probe};
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -570,7 +571,7 @@ impl KernApp {
             "Font Family",
             "Applied on Enter. Use a monospaced family.",
             Scope::Global,
-            self.field(200.).child(Input::new(&family)),
+            self.field(200.).child(Input::new(&family).small()),
             cx,
         ));
         let c = self.stepper(
@@ -699,7 +700,7 @@ impl KernApp {
             "Shell",
             "For new sessions. Applied on Enter.",
             Scope::Global,
-            self.field(240.).child(Input::new(&shell)),
+            self.field(240.).child(Input::new(&shell).small()),
             cx,
         ));
         let c = self.stepper(
@@ -748,7 +749,7 @@ impl KernApp {
             let full = py.read(cx).value().to_string();
             let c = self
                 .controls()
-                .child(self.field(240.).child(Input::new(&py)))
+                .child(self.field(240.).child(Input::new(&py).small()))
                 .child(self.copy_button("copy-py", full))
                 .child(
                     button("save-py", "Save", p)
@@ -787,8 +788,8 @@ impl KernApp {
         );
         let c = self
             .controls()
-            .child(self.field(150.).child(Input::new(&pat)))
-            .child(self.field(150.).child(Input::new(&lang_id)))
+            .child(self.field(150.).child(Input::new(&pat).small()))
+            .child(self.field(150.).child(Input::new(&lang_id).small()))
             .child(
                 button("add-assoc", "Add", p)
                     .on_click(cx.listener(|t, _, _, cx| t.add_association(cx))),
@@ -821,7 +822,7 @@ impl KernApp {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .font_family("Menlo")
+                            .font_family(crate::core::settings::MONO_FONT)
                             .child(format!("{k} → {v}")),
                     )
                     .child(
@@ -950,7 +951,7 @@ impl KernApp {
                                     div()
                                         .text_size(px(11.))
                                         .text_color(p.muted)
-                                        .font_family("Menlo")
+                                        .font_family(crate::core::settings::MONO_FONT)
                                         .child(l.id),
                                 ),
                         )
@@ -989,7 +990,7 @@ impl KernApp {
                                 div()
                                     .text_size(px(10.))
                                     .text_color(p.muted)
-                                    .font_family("Menlo")
+                                    .font_family(crate::core::settings::MONO_FONT)
                                     .child(l.id),
                             ),
                     )
@@ -1029,11 +1030,11 @@ impl KernApp {
             .gap_1()
             .when(self.stacked(), |d| d.w_full())
             .when(!self.stacked(), |d| d.w(px(260.)))
-            .child(Input::new(&ln))
-            .child(Input::new(&lc))
-            .child(Input::new(&la))
-            .child(Input::new(&le))
-            .child(Input::new(&lr))
+            .child(Input::new(&ln).small())
+            .child(Input::new(&lc).small())
+            .child(Input::new(&la).small())
+            .child(Input::new(&le).small())
+            .child(Input::new(&lr).small())
             .child(
                 div().flex().child(
                     button("add-lsp", "Add Server", p)
@@ -1200,8 +1201,8 @@ impl KernApp {
         }
         let form = self
             .controls()
-            .child(self.field(130.).child(Input::new(&tn)))
-            .child(self.field(220.).child(Input::new(&tp)))
+            .child(self.field(130.).child(Input::new(&tn).small()))
+            .child(self.field(220.).child(Input::new(&tp).small()))
             .child(
                 button("save-tool", "Apply", p)
                     .on_click(cx.listener(|t, _, _, cx| t.save_tool_path(cx))),
@@ -1216,7 +1217,7 @@ impl KernApp {
         rows
     }
 
-    pub fn render_settings_tab(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_settings_tab(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
         // The tab's real width: the window minus the activity bar and whatever
         // panels are open beside the editor area.
@@ -1277,7 +1278,15 @@ impl KernApp {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Settings"),
                     )
-                    .child(div().flex_1().max_w(px(420.)).child(Input::new(&query)))
+                    .child(div().flex_1().max_w(px(420.)).child({
+                        // A 1 px accent border when focused instead of the thick
+                        // outer ring: still clear from the keyboard.
+                        let focused = query.read(cx).focus_handle(cx).is_focused(window);
+                        Input::new(&query)
+                            .small()
+                            .focus_bordered(false)
+                            .when(focused, |i| i.border_color(p.accent))
+                    }))
                     .child(div().flex_1())
                     .when(self.project.is_none(), |d| {
                         d.child(button("settings-close", "Close", p).on_click(cx.listener(

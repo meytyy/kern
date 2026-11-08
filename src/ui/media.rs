@@ -23,9 +23,16 @@ pub enum MediaKind {
     Raster,
     Svg,
     Video,
+    /// .zip, .tar, .tar.gz, .tgz: the list of files inside, read only.
+    Archive,
+    /// Anything else that is not text: what it is and how big.
+    Binary,
 }
 
 pub fn kind_for(path: &Path) -> Option<MediaKind> {
+    if crate::workspace::archive::archive_kind(path).is_some() {
+        return Some(MediaKind::Archive);
+    }
     let ext = path.extension()?.to_str()?.to_lowercase();
     match ext.as_str() {
         "png" | "jpg" | "jpeg" | "webp" | "gif" => Some(MediaKind::Raster),
@@ -117,6 +124,11 @@ enum Content {
     #[cfg(target_os = "macos")]
     Video(VideoState),
     Failed(String),
+    Archive {
+        kind: crate::workspace::archive::ArchiveKind,
+        listing: Result<crate::workspace::archive::Listing, String>,
+    },
+    Binary(String),
 }
 
 pub struct MediaView {
@@ -135,6 +147,7 @@ impl MediaView {
         match kind {
             MediaKind::Raster | MediaKind::Svg => view.load_image(cx),
             MediaKind::Video => view.load_video(cx),
+            MediaKind::Archive | MediaKind::Binary => view.load_listing(cx),
         }
         view
     }
@@ -283,6 +296,7 @@ impl MediaView {
         match &self.content {
             Content::Loading => "loading".into(),
             Content::Failed(e) => format!("failed: {e}"),
+            Content::Archive { .. } | Content::Binary(_) => self.summary(),
             Content::Image(i) => format!(
                 "image {:?} {} failed={} note={:?}",
                 i.size, i.format, i.decode_failed, i.note
@@ -334,6 +348,225 @@ impl MediaView {
         if let Err(e) = open::that_detached(&self.path) {
             log::warn!("cannot open {}: {e}", self.path.display());
         }
+    }
+
+    /// The archive's table of contents (or the binary file's type), off the UI thread.
+    fn load_listing(&mut self, cx: &mut Context<Self>) {
+        use crate::workspace::archive;
+        let path = self.path.clone();
+        let kind = self.kind;
+        cx.spawn(async move |this, cx| {
+            // Plain data crosses threads; the view's content is built on the UI thread.
+            let result = cx
+                .background_spawn(async move {
+                    match (kind, archive::archive_kind(&path)) {
+                        (MediaKind::Archive, Some(k)) => Ok((k, archive::list(&path, k))),
+                        _ => Err(archive::describe_binary(&path)),
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.content = match result {
+                    Ok((kind, listing)) => Content::Archive { kind, listing },
+                    Err(desc) => Content::Binary(desc),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// What the tab shows, in words (tests and accessibility).
+    pub fn summary(&self) -> String {
+        match &self.content {
+            Content::Loading => "loading".into(),
+            Content::Failed(m) => format!("failed: {m}"),
+            Content::Image(_) => "image".into(),
+            #[cfg(target_os = "macos")]
+            Content::Video(_) => "video".into(),
+            Content::Binary(desc) => format!("binary: {desc}"),
+            Content::Archive { kind, listing } => match listing {
+                Ok(l) => format!(
+                    "archive: {} · {} entries · {}",
+                    kind.label(),
+                    l.entries.len(),
+                    l.entries
+                        .iter()
+                        .map(|e| e.path.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Err(e) => format!("archive error: {e}"),
+            },
+        }
+    }
+
+    fn file_size(&self) -> String {
+        std::fs::metadata(&self.path)
+            .map(|m| crate::workspace::archive::human_size(m.len()))
+            .unwrap_or_default()
+    }
+
+    /// Archive or binary file: what it is, how big, and the system's ways to open it.
+    fn render_contents(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::workspace::archive::human_size;
+        let p = pal(cx);
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let (kind_label, listing) = match &self.content {
+            Content::Archive { kind, listing } => (kind.label().to_string(), Some(listing.clone())),
+            Content::Binary(desc) => (desc.clone(), None),
+            _ => (String::new(), None),
+        };
+        let reveal = if cfg!(target_os = "macos") {
+            "Reveal in Finder"
+        } else {
+            "Show in File Explorer"
+        };
+        let path = self.path.clone();
+        let header = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .pb_3()
+            .border_b_1()
+            .border_color(p.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        icon(if listing.is_some() {
+                            "ft-archive"
+                        } else {
+                            "ft-file"
+                        })
+                        .with_size(px(18.))
+                        .text_color(p.muted),
+                    )
+                    .child(
+                        div()
+                            .id("bin-name")
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(name),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(p.muted)
+                    .child(format!("{kind_label} · {} · read only", self.file_size())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .pt_1()
+                    .child(
+                        button("bin-open", "Open With Default App", p)
+                            .on_click(cx.listener(|this, _, _, _| this.open_externally())),
+                    )
+                    .child(button("bin-reveal", reveal, p).on_click(move |_, _, _| {
+                        crate::platform::reveal(&path).ok();
+                    })),
+            );
+        let body: AnyElement = match listing {
+            None => div()
+                .pt_3()
+                .text_size(px(12.))
+                .text_color(p.muted)
+                .child("KERN does not show this kind of file. Open it with the app made for it.")
+                .into_any_element(),
+            Some(Err(e)) => div()
+                .pt_3()
+                .text_size(px(12.))
+                .text_color(p.danger)
+                .child(format!("Cannot read the archive: {e}"))
+                .into_any_element(),
+            Some(Ok(l)) => {
+                let files = l.entries.iter().filter(|e| !e.dir).count();
+                let summary = format!(
+                    "{files} files{} · {} unpacked{}",
+                    if l.entries.len() > files {
+                        format!(", {} folders", l.entries.len() - files)
+                    } else {
+                        String::new()
+                    },
+                    human_size(l.unpacked),
+                    if l.truncated {
+                        format!(" · first {} entries shown", l.entries.len())
+                    } else {
+                        String::new()
+                    }
+                );
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .py_2()
+                            .text_size(px(11.))
+                            .text_color(p.muted)
+                            .child(summary),
+                    )
+                    .child(
+                        div()
+                            .id("archive-entries")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .children(l.entries.into_iter().enumerate().map(|(i, e)| {
+                                div()
+                                    .id(("entry", i))
+                                    .flex()
+                                    .gap_3()
+                                    .h(px(ROW_H))
+                                    .items_center()
+                                    .text_size(px(12.))
+                                    .font_family(crate::core::settings::MONO_FONT)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .text_color(if e.dir { p.muted } else { p.fg })
+                                            .child(e.path),
+                                    )
+                                    .child(div().flex_shrink_0().text_color(p.muted).child(
+                                        if e.dir {
+                                            String::new()
+                                        } else {
+                                            human_size(e.size)
+                                        },
+                                    ))
+                            })),
+                    )
+                    .into_any_element()
+            }
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p_4()
+            .bg(p.editor)
+            .child(header)
+            .child(body)
+            .into_any_element()
     }
 
     fn render_failed(&self, msg: String, cx: &mut Context<Self>) -> AnyElement {
@@ -732,7 +965,7 @@ impl MediaView {
                         div()
                             .flex_shrink_0()
                             .text_size(px(11.))
-                            .font_family("Menlo")
+                            .font_family(crate::core::settings::MONO_FONT)
                             .text_color(p.fg)
                             .child(format!("{} / {}", clock(cur), clock(dur))),
                     )
@@ -974,6 +1207,7 @@ impl Render for MediaView {
                 self.render_failed(msg, cx)
             }
             Content::Image(_) => self.render_image(cx),
+            Content::Archive { .. } | Content::Binary(_) => self.render_contents(cx),
             #[cfg(target_os = "macos")]
             Content::Video(_) => self.render_video(cx),
         }

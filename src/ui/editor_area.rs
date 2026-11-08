@@ -25,6 +25,11 @@ pub struct FileTab {
     pub lsp_failed: Option<(String, String)>,
     pub diagnostic_counts: (usize, usize),
     pub pull_generation: u64,
+    /// Diagnostics a server pushed (rust-analyzer: cargo check) and the ones
+    /// KERN pulled (its own analysis). Shown together; each source replaces
+    /// only its own set.
+    pub pushed_diagnostics: Vec<lsp_types::Diagnostic>,
+    pub pulled_diagnostics: Vec<lsp_types::Diagnostic>,
     pub _sub: Subscription,
     pub _obs: Subscription,
 }
@@ -149,11 +154,45 @@ impl KernApp {
             let result = load.await;
             this.update_in(cx, |this, window, cx| match result {
                 Ok((doc, text)) => this.add_file_tab(doc, text, activate, jump, window, cx),
-                Err(e) => this.toast(format!("Cannot open {}: {e}", path.display()), true, cx),
+                // Not text: the file opens in a read-only tab that says what it is.
+                Err(e) if e.to_string().contains("binary") => {
+                    this.open_binary_tab(path.clone(), cx)
+                }
+                Err(e) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    log::warn!("cannot open {}: {e}", path.display());
+                    this.toast(format!("Cannot open {name}: {e}"), true, cx)
+                }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// A binary file that is not an image, video or archive: a tab with its type
+    /// and size, and buttons to open or show it with the system.
+    fn open_binary_tab(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.project else { return };
+        if let Some(ix) = p
+            .tabs
+            .iter()
+            .position(|t| t.file_path() == Some(path.as_path()))
+        {
+            p.active = Some(ix);
+            cx.notify();
+            return;
+        }
+        let view_path = path.clone();
+        let view = cx
+            .new(|cx| super::media::MediaView::new(view_path, super::media::MediaKind::Binary, cx));
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        p.tabs.push(Tab::Media(view, path));
+        p.active = Some(p.tabs.len() - 1);
+        self.persist();
+        cx.notify();
     }
 
     fn add_file_tab(
@@ -168,6 +207,12 @@ impl KernApp {
         let Some(p) = &mut self.project else { return };
         let path = doc.path.clone();
         if !path.starts_with(&p.root) && !path.exists() {
+            return;
+        }
+        // Opened again while it was loading (a restored session and a click in
+        // Explorer, a double click): one tab per file.
+        if p.tabs.iter().any(|t| t.file_path() == Some(path.as_path())) {
+            self.open_file_async(path, activate, jump, window, cx);
             return;
         }
         let root = p.root.clone();
@@ -188,6 +233,8 @@ impl KernApp {
             lsp_failed: None,
             diagnostic_counts: (0, 0),
             pull_generation: 0,
+            pushed_diagnostics: vec![],
+            pulled_diagnostics: vec![],
             _sub: sub,
             _obs: obs,
         };
@@ -210,7 +257,7 @@ impl KernApp {
         &mut self,
         editor: &Entity<EditorState>,
         ev: &InputEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !matches!(ev, InputEvent::Change) {
@@ -235,6 +282,7 @@ impl KernApp {
         if let Some(path) = changed {
             self.schedule_pull_diagnostics(path, cx);
         }
+        self.signature_after_edit(editor, window, cx);
         cx.notify();
     }
 
@@ -775,7 +823,7 @@ impl KernApp {
             }
         };
         let special_body = special.map(|s| match s {
-            None => self.render_settings_tab(cx),
+            None => self.render_settings_tab(window, cx),
             Some(id) => self.render_extension_page(&id, cx),
         });
         let p = self.project.as_ref().expect("project");
@@ -789,13 +837,31 @@ impl KernApp {
             Some(Tab::Settings | Tab::Extension(_)) => div().into_any_element(),
             Some(Tab::File(f)) => editor_tab_keys(div(), &f.editor)
                 .key_context("KernEditor")
+                // Esc also closes the parameter hint; the editor still gets it.
+                .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                    if ev.keystroke.key == "escape" && this.signature.take().is_some() {
+                        cx.notify();
+                    }
+                }))
                 .size_full()
                 .bg(palette.editor)
                 .child(
                     Editor::new(&f.editor)
                         .h_full()
                         .bordered(false)
-                        .appearance(false),
+                        .appearance(false)
+                        // The system menu shows each command's shortcut for this OS.
+                        .context_menu(|menu, _, _| {
+                            use gpui_kit::component::input as gi;
+                            menu.menu("Cut", Box::new(gi::Cut))
+                                .menu("Copy", Box::new(gi::Copy))
+                                .menu("Paste", Box::new(gi::Paste))
+                                .separator()
+                                .menu("Select All", Box::new(gi::SelectAll))
+                                .separator()
+                                .menu("Go to Definition", Box::new(GoToDefinitionHere))
+                                .menu("Format Document", Box::new(FormatDocument))
+                        }),
                 )
                 .into_any_element(),
             Some(Tab::Diff(d)) => div()
@@ -891,6 +957,8 @@ impl KernApp {
         let old = f.lang;
         f.lang = lang;
         f.diagnostic_counts = (0, 0);
+        f.pushed_diagnostics.clear();
+        f.pulled_diagnostics.clear();
         if let Some(c) = f.lsp.take() {
             c.did_close(&lsp::path_to_uri(&f.path));
         }

@@ -63,6 +63,8 @@ pub enum PromptKind {
 #[derive(Clone, Copy)]
 pub enum Command {
     OpenFolder,
+    FormatDocument,
+    TriggerSuggest,
     NewFile,
     NewFolder,
     CheckForUpdates,
@@ -129,6 +131,16 @@ const COMMANDS: &[(&str, Option<keys::Keys>, Command)] = &[
         "Editor: Go to Definition",
         Some(keys::GO_TO_DEFINITION),
         Command::GoToDefinition,
+    ),
+    (
+        "Format Document",
+        Some(keys::FORMAT_DOCUMENT),
+        Command::FormatDocument,
+    ),
+    (
+        "Editor: Trigger Suggest",
+        Some(keys::TRIGGER_SUGGEST),
+        Command::TriggerSuggest,
     ),
     (
         "View: Toggle Sidebar",
@@ -651,6 +663,8 @@ impl KernApp {
             Command::AttachSelection => self.agent_attach_selection(self.agent_tab, cx),
             Command::TrustFolder => self.trust_project(window, cx),
             Command::GoToDefinition => self.go_to_definition(window, cx),
+            Command::FormatDocument => self.format_document(window, cx),
+            Command::TriggerSuggest => self.trigger_suggest(window, cx),
             Command::ReviewDiff => self.agent_open_review(self.agent_tab, window, cx),
         }
         cx.notify();
@@ -1175,7 +1189,7 @@ impl KernApp {
                 .gap_1()
                 .text_size(px(12.))
                 .child("GitHub CLI is not installed. Install it, then press Refresh:")
-                .child(div().font_family("Menlo").text_color(palette.accent).child("brew install gh"))
+                .child(div().font_family(crate::core::settings::MONO_FONT).text_color(palette.accent).child("brew install gh"))
                 .child(div().text_color(palette.muted).child("Clone Repository works without GitHub."))
                 .into_any_element(),
             GithubView::SignedOut => div()

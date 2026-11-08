@@ -251,6 +251,7 @@ impl KernApp {
                     .hover(|s| s.opacity(0.85))
                     .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, stop_prop)
+                    .tooltip(tip(format!("Run ({})", super::keys::RUN.label())))
                     .on_click(cx.listener(|this, _, w, cx| this.run_selected(w, cx)))
                     .child(icon_el("play", 13., palette.accent)),
             )
@@ -265,6 +266,11 @@ impl KernApp {
                     .hover(move |s| s.bg(palette.hover))
                     .when(running, |d| d.cursor_pointer())
                     .on_mouse_down(MouseButton::Left, stop_prop)
+                    .tooltip(tip(if running {
+                        format!("Stop ({})", super::keys::STOP.label())
+                    } else {
+                        "Stop: nothing is running".to_string()
+                    }))
                     .on_click(cx.listener(|this, _, _, cx| this.stop_run(cx)))
                     .child(icon_el("square", 12., if running { palette.danger } else { palette.border })),
             )
@@ -617,7 +623,7 @@ impl KernApp {
         )
         .track_scroll(&scroll)
         .size_full()
-        .font_family("Menlo")
+        .font_family(crate::core::settings::MONO_FONT)
         .text_size(px(12.))
     }
 

@@ -40,6 +40,9 @@ pub const EXTENSIONS: Keys = k("cmd-shift-x", "ctrl-shift-x");
 pub const CLOSE_TAB: Keys = k("cmd-w", "ctrl-w");
 pub const NEW_FILE: Keys = k("cmd-n", "ctrl-n");
 pub const GO_TO_DEFINITION: Keys = same("f12");
+pub const FORMAT_DOCUMENT: Keys = k("alt-shift-f", "shift-alt-f");
+/// Taken by macOS for input sources unless changed; the palette has the command too.
+pub const TRIGGER_SUGGEST: Keys = same("ctrl-space");
 
 impl Keys {
     /// The keystroke for this build's platform.
@@ -85,10 +88,11 @@ pub fn label(keystroke: &str, mac: bool) -> String {
         s + &key_text
     } else {
         let mut out: Vec<String> = vec![];
+        // The order Windows apps write: Ctrl+Shift+Alt+key.
         for (m, name) in [
             ("ctrl", "Ctrl"),
-            ("alt", "Alt"),
             ("shift", "Shift"),
+            ("alt", "Alt"),
             ("cmd", "Win"),
         ] {
             if has(m) {
@@ -133,6 +137,8 @@ mod tests {
             (TOGGLE_CODEX, "⌥⌘C", "Ctrl+Shift+A"),
             (STOP, "⌘.", "Ctrl+."),
             (GO_TO_DEFINITION, "F12", "F12"),
+            (FORMAT_DOCUMENT, "⌥⇧F", "Shift+Alt+F"),
+            (TRIGGER_SUGGEST, "⌃Space", "Ctrl+Space"),
         ];
         for (keys, mac, win) in rows {
             assert_eq!(label(keys.mac, true), mac);
@@ -163,6 +169,8 @@ mod tests {
             CLOSE_TAB,
             NEW_FILE,
             GO_TO_DEFINITION,
+            FORMAT_DOCUMENT,
+            TRIGGER_SUGGEST,
         ];
         for keys in all {
             let l = label(keys.win, false);

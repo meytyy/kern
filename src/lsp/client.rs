@@ -85,6 +85,14 @@ fn client_capabilities() -> Value {
             },
             "hover": {"contentFormat": ["markdown", "plaintext"]},
             "definition": {"linkSupport": true},
+            "formatting": {"dynamicRegistration": false},
+            "signatureHelp": {
+                "signatureInformation": {
+                    "documentationFormat": ["markdown", "plaintext"],
+                    "parameterInformation": {"labelOffsetSupport": true},
+                    "activeParameterSupport": true
+                }
+            },
             "publishDiagnostics": {"relatedInformation": false, "versionSupport": true},
             "diagnostic": {"dynamicRegistration": false, "relatedDocumentSupport": false}
         }

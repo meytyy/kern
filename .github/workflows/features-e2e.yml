@@ -1,0 +1,270 @@
+name: Windows editor and terminal check
+
+# On a fresh Windows machine, with the scripted test driver built in: installs
+# KERN and, in a project with a Cyrillic path, presses Shift+Alt+F and
+# Ctrl+Space through Windows itself (SendKeys), checks Format Document with
+# rust-analyzer (one undo, the cursor, CRLF on disk), the message when a
+# language has no formatter, parameter hints, archives and binary files, and the
+# terminal cursor right after the prompt: after typing, arrows, Backspace, Tab,
+# Ctrl+C, a resize, a wrapped line and hiding the panel.
+on:
+  workflow_dispatch:
+  push:
+    branches: [features-e2e]
+
+jobs:
+  e2e:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain, rust-analyzer and Inno Setup
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc --component rust-analyzer
+          rustup default stable
+          rust-analyzer --version
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Fonts on this machine
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $names = (New-Object System.Drawing.Text.InstalledFontCollection).Families.Name
+          New-Item -ItemType Directory -Force shots | Out-Null
+          foreach ($f in 'Menlo', 'Consolas') { "$f installed: $($names -contains $f)" | Tee-Object -Append shots\fonts.txt }
+
+      - name: Build and install KERN with the test driver
+        run: |
+          cargo build --release --features autotest --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { throw "cargo build failed" }
+          New-Item -ItemType Directory -Force dist\windows\KERN | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\kern.exe dist\windows\KERN\KERN.exe -Force
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\KERN.iss | Out-Null
+          if ($LASTEXITCODE) { throw "ISCC failed" }
+          Start-Process dist\windows\KERN-windows-x64-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          "installed: $((Get-Item "$env:ProgramFiles\KERN\KERN.exe").VersionInfo.ProductVersion)" | Tee-Object shots\versions.txt
+
+      - name: Test project, helpers and script
+        run: |
+          $t = 'C:\kern-test'
+          $proj = "$t\Проект с пробелами"
+          New-Item -ItemType Directory -Force "$proj\src", "$proj\Документы\Папка с длинным именем", "$t\shots", "$t\work\app\lib", "$t\work\lib" | Out-Null
+          [IO.File]::WriteAllText("$proj\Cargo.toml", "[package]`r`nname = `"demo`"`r`nversion = `"0.1.0`"`r`nedition = `"2021`"`r`n")
+          # CRLF on purpose: the file must keep it after formatting and saving.
+          [IO.File]::WriteAllText("$proj\src\main.rs", "/// Adds two numbers.`r`nfn add(a: i32,b:i32)->i32{a+b}`r`n`r`nfn main(){`r`nlet x=add(1,2);`r`n    println!(`"{}`",x);`r`n}`r`n")
+          [IO.File]::WriteAllText("$proj\README.md", "# Demo`n`nText  with   spaces.`n")
+          # Archives: a normal tar.gz and zip, a cut one, and an ELF binary.
+          'fn main() {}' | Set-Content "$t\work\app\main.rs"
+          'data' | Set-Content "$t\work\app\lib\data.txt"
+          'data' | Set-Content "$t\work\lib\data.txt"
+          $rnd = New-Object byte[] 300000; (New-Object Random 7).NextBytes($rnd)
+          [IO.File]::WriteAllBytes("$t\work\app\blob.bin", $rnd)
+          Push-Location "$t\work"
+          tar -czf "$proj\Kayo-1.0.1-update.tar.gz" app
+          tar -a -cf "$proj\bundle.zip" lib
+          Pop-Location
+          $tgz = [IO.File]::ReadAllBytes("$proj\Kayo-1.0.1-update.tar.gz")
+          [IO.File]::WriteAllBytes("$proj\broken.tar.gz", $tgz[0..([int]($tgz.Length / 2))])
+          [IO.File]::WriteAllBytes("$proj\tool.bin", [byte[]](0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0) + $rnd[0..2000])
+
+          # Keys through Windows to the KERN window, as a person presses them.
+          @'
+          param([string]$what)
+          Add-Type -AssemblyName System.Windows.Forms
+          $w = New-Object -ComObject WScript.Shell
+          $p = Get-Process KERN | Select-Object -First 1
+          [void]$w.AppActivate($p.Id)
+          Start-Sleep -Milliseconds 400
+          $k = switch ($what) { 'format' { '+%f' } 'suggest' { '^ ' } 'echo' { 'echo после' } }
+          [System.Windows.Forms.SendKeys]::SendWait($k)
+          '@ | Set-Content "$t\keys.ps1" -Encoding utf8BOM
+          @'
+          param([string]$name)
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("C:\kern-test\shots\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          '@ | Set-Content "$t\shot.ps1"
+          "@powershell -NoProfile -ExecutionPolicy Bypass -File C:\kern-test\shot.ps1 %2" | Set-Content "$t\shot.cmd" -Encoding ascii
+          @'
+          $s = [IO.File]::ReadAllText('C:\kern-test\Проект с пробелами\src\main.rs')
+          if (-not $s.Contains("fn add(a: i32, b: i32) -> i32 {`r`n")) { Write-Output "not formatted with CRLF: $s"; exit 1 }
+          if ($s -match "[^`r]`n") { Write-Output "a bare LF on disk"; exit 1 }
+          Write-Output 'CRLF kept'
+          '@ | Set-Content "$t\crlf.ps1" -Encoding utf8BOM
+
+          $keys = "powershell -NoProfile -ExecutionPolicy Bypass -File $t\keys.ps1"
+          $wide = 'о' * 130
+          @"
+          open $proj
+          waitfor 15 project Проект с пробелами
+          trust
+          side files
+          openfile src\main.rs
+          waitfor 15 active main.rs
+          waitfor 300 lsp rust-analyzer
+          sleep 10000
+          # Shift+Alt+F does nothing in the terminal
+          panel terminal
+          sleep 2000
+          focus terminal
+          sleep 3000
+          shell $keys format
+          sleep 3000
+          check termfocused
+          check buffer fn add(a: i32,b:i32)->i32{a+b}
+          # Format Document: Shift+Alt+F through Windows
+          focus editor
+          goto 4 2
+          sleep 500
+          shot fmt-before
+          shell $keys format
+          waitfor 60 buffer fn add(a: i32, b: i32) -> i32 {
+          check buffer     let x = add(1, 2);
+          check dirty 1
+          check cursor 6 6
+          shot fmt-after
+          key ctrl-z
+          sleep 500
+          check buffer fn add(a: i32,b:i32)->i32{a+b}
+          shell $keys format
+          waitfor 60 buffer fn add(a: i32, b: i32) -> i32 {
+          key ctrl-s
+          sleep 1000
+          check dirty 0
+          shell powershell -NoProfile -ExecutionPolicy Bypass -File $t\crlf.ps1
+          # Parameter hints and Ctrl+Space
+          goto 7 0
+          key enter
+          key up
+          sleep 300
+          type add(
+          waitfor 20 signature [a: i32]
+          shot sig-first
+          type 1,
+          waitfor 20 signature [b: i32]
+          shot sig-second
+          key escape
+          sleep 300
+          check signature none
+          shell $keys suggest
+          waitfor 20 completionopen
+          shot suggest
+          key escape
+          # A language without a formatter
+          openfile README.md
+          waitfor 10 active README.md
+          focus editor
+          sleep 500
+          shell $keys format
+          sleep 1500
+          check toast No formatter for Markdown
+          shot fmt-none
+          # Archives and binary files
+          openfile Kayo-1.0.1-update.tar.gz
+          waitfor 15 mediacontent app/main.rs
+          shot archive-tgz
+          openfile bundle.zip
+          waitfor 15 mediacontent lib/data.txt
+          shot archive-zip
+          openfile broken.tar.gz
+          waitfor 15 mediacontent archive error
+          shot archive-broken
+          openfile tool.bin
+          waitfor 15 mediacontent binary: ELF
+          shot binary
+          openfile src\main.rs
+          waitfor 10 active main.rs
+          check lang rust
+          # Terminal cursor
+          panel terminal
+          sleep 1000
+          focus terminal
+          sleep 1500
+          check termcursor
+          shot term-open
+          type cd "Документы\Папка с длинным именем"
+          key enter
+          sleep 2000
+          check term Папка с длинным именем
+          check termcursor
+          type echo привет мир
+          sleep 500
+          check termcursor
+          key left
+          key left
+          key left
+          key backspace
+          sleep 500
+          check termcursor
+          key enter
+          sleep 1500
+          check term приветмир
+          type Get-ChildItem ..\..\Док
+          key tab
+          sleep 2000
+          check termcursor
+          shot term-tab
+          key ctrl-c
+          sleep 1000
+          check termcursor
+          layout bottom 160
+          sleep 1500
+          check termcursor
+          type echo $wide
+          sleep 800
+          check termcursor
+          shot term-wrap
+          key ctrl-c
+          sleep 800
+          action ToggleTerminal
+          sleep 800
+          action ToggleTerminal
+          sleep 1500
+          focus terminal
+          sleep 500
+          shell $keys echo
+          sleep 2000
+          check term echo после
+          check termcursor
+          shot term-typed
+          quit
+          "@ | Set-Content "$t\script.txt"
+
+      - name: Run the script in the installed KERN
+        run: |
+          $log = 'C:\kern-test\autotest.log'
+          $env:KERN_CONFIG_DIR = 'C:\kern-test\config'
+          $env:KERN_AUTOTEST = 'C:\kern-test\script.txt'
+          $env:KERN_AUTOTEST_LOG = $log
+          $env:KERN_SHOT_CMD = 'C:\kern-test\shot.cmd'
+          $env:KERN_UPDATE_URL = 'file:///C:/kern-test/no-releases.json'
+          Start-Process (Join-Path $env:ProgramFiles 'KERN\KERN.exe')
+          for ($i = 0; $i -lt 900; $i++) {
+            Start-Sleep 1
+            if ((Test-Path $log) -and ((Get-Content $log -Raw) -match '\] done, ')) { break }
+          }
+          Start-Sleep 2
+          Get-Process KERN -ErrorAction SilentlyContinue | Stop-Process -Force
+          Copy-Item $log shots\autotest.log -ErrorAction SilentlyContinue
+          Copy-Item C:\kern-test\shots\*.png shots\ -ErrorAction SilentlyContinue
+          Get-Content $log
+          if (-not (Select-String -Path $log -Pattern '\] done, 0 failures')) { throw "script steps failed" }
+
+      - name: Unit tests (Windows)
+        if: always()
+        run: |
+          cargo test --release --features autotest --target x86_64-pc-windows-msvc 2>&1 | Select-String -Pattern '^test result|FAILED|panicked' | Tee-Object shots\unit-tests.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: features-e2e
+          path: shots/

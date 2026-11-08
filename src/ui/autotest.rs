@@ -302,6 +302,8 @@ pub fn maybe_start(window: &mut Window, cx: &mut Context<KernApp>) {
                         "DownloadUpdate" => Some(Box::new(DownloadUpdate)),
                         "RestartToUpdate" => Some(Box::new(RestartToUpdate)),
                         "AboutKern" => Some(Box::new(AboutKern)),
+                        "TriggerSuggest" => Some(Box::new(TriggerSuggest)),
+                        "FormatDocument" => Some(Box::new(FormatDocument)),
                         _ => None,
                     };
                     match action {
@@ -1129,6 +1131,13 @@ impl KernApp {
                 let t = e.read(cx).text().to_string();
                 ok(!t.contains(arg), "buffer still contains it".to_string())
             }
+            "cursor" => {
+                // "line column", zero-based like `goto`.
+                let f = self.active_file().ok_or("no active file")?;
+                let pos = f.editor.read(cx).cursor_position();
+                let got = format!("{} {}", pos.line, pos.character);
+                ok(got == arg, got)
+            }
             "dirty" => {
                 let f = self.active_file().ok_or("no active file")?;
                 ok(
@@ -1346,6 +1355,28 @@ impl KernApp {
                 }
                 _ => Err("no confirmation".into()),
             },
+            "mediacontent" => {
+                let p = self.project.as_ref().ok_or("no project")?;
+                let tab = p.active.and_then(|a| p.tabs.get(a)).ok_or("no tab")?;
+                match tab {
+                    super::editor_area::Tab::Media(v, _) => {
+                        let s = v.read(cx).summary();
+                        ok(s.contains(arg), s.chars().take(300).collect())
+                    }
+                    _ => Err("active tab is not a media tab".into()),
+                }
+            }
+            "signature" => {
+                let s = self.signature.as_ref().map(|s| {
+                    let (a, b) = s.active.clone().map(|r| (r.start, r.end)).unwrap_or((0, 0));
+                    format!("{} [{}]", s.label, &s.label[a..b])
+                });
+                match (arg, s) {
+                    ("none", None) => Ok(String::new()),
+                    (_, Some(s)) if s.contains(arg) => Ok(s),
+                    (_, s) => Err(format!("signature={s:?}")),
+                }
+            }
             "hasassoc" => ok(
                 self.settings.file_associations.contains_key(arg),
                 format!("{:?}", self.settings.file_associations),
@@ -1447,6 +1478,21 @@ impl KernApp {
                 }
                 _ => Err("About is not open".into()),
             },
+            "termcursor" => {
+                // Characters on the cursor's row start in their own cells, so the
+                // cursor is drawn right after the text.
+                let t = self.at_terminal()?;
+                let v = t.read(cx);
+                let drift = v.drift.ok_or("terminal not painted yet")?;
+                let limit = f32::from(v.cell_width()) / 2.;
+                ok(
+                    drift < limit,
+                    format!(
+                        "text and cells differ by {drift:.1}px (cell {:.1}px)",
+                        limit * 2.
+                    ),
+                )
+            }
             "termtitle" => {
                 let t = self.at_terminal()?;
                 let title = t.read(cx).title.clone();

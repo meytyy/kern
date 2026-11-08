@@ -354,7 +354,7 @@ impl KernApp {
                 .child(
                     div()
                         .text_size(px(11.))
-                        .font_family("Menlo")
+                        .font_family(crate::core::settings::MONO_FONT)
                         .text_color(p.muted)
                         .child(c.hash.clone()),
                 )
@@ -422,6 +422,7 @@ impl KernApp {
         let p = pal(cx);
         let hidden = self.settings.graph_hidden;
         let all = self.settings.graph_all_branches;
+        let narrow = self.settings.layout.sidebar_width < 250.;
         let header = div()
             .id("graph-header")
             .flex()
@@ -469,10 +470,12 @@ impl KernApp {
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_graph_all(!this.settings.graph_all_branches, cx)
                         }))
-                        .child(if all {
-                            "All Branches"
-                        } else {
-                            "Current Branch"
+                        .tooltip(tip("Show commits of all branches or only the current one"))
+                        .child(match (all, narrow) {
+                            (true, false) => "All Branches",
+                            (false, false) => "Current Branch",
+                            (true, true) => "All",
+                            (false, true) => "Current",
                         }),
                 )
                 .child(
@@ -558,9 +561,10 @@ impl KernApp {
                                     .flex_shrink_0(),
                                 )
                                 .child(
+                                    // The message keeps room; branch labels give way to it.
                                     div()
                                         .flex_1()
-                                        .min_w_0()
+                                        .min_w(px(60.))
                                         .overflow_hidden()
                                         .whitespace_nowrap()
                                         .text_ellipsis()
@@ -568,35 +572,57 @@ impl KernApp {
                                         .when(head, |d| d.font_weight(FontWeight::SEMIBOLD))
                                         .child(c.subject.clone()),
                                 )
-                                .children(
-                                    c.refs
+                                .children({
+                                    // One label and "+N"; every name is in the tooltip.
+                                    let refs: Vec<_> = c
+                                        .refs
                                         .iter()
                                         .filter(|r| !(r.kind == RefKind::Head && r.name == "HEAD"))
-                                        .take(3)
-                                        .enumerate()
-                                        .map(|(i, r)| {
-                                            let color = match r.kind {
-                                                RefKind::Head => p.accent,
-                                                RefKind::Branch => p.success,
-                                                RefKind::Remote => p.muted,
-                                                RefKind::Tag => p.warning,
-                                            };
-                                            div()
-                                                .id(("ref", i))
-                                                .flex_shrink_0()
-                                                .max_w(px(96.))
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .px_1()
-                                                .rounded(px(3.))
-                                                .border_1()
-                                                .border_color(color)
-                                                .text_size(px(10.))
-                                                .text_color(color)
-                                                .child(r.name.clone())
-                                        }),
-                                )
+                                        .collect();
+                                    let all_names = refs
+                                        .iter()
+                                        .map(|r| r.name.clone())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    let more = refs.len().saturating_sub(1);
+                                    refs.first().map(|r| {
+                                        let color = match r.kind {
+                                            RefKind::Head => p.accent,
+                                            RefKind::Branch => p.success,
+                                            RefKind::Remote => p.muted,
+                                            RefKind::Tag => p.warning,
+                                        };
+                                        div()
+                                            .id(("ref", ix))
+                                            .flex()
+                                            .flex_shrink_0()
+                                            .gap_0p5()
+                                            .items_center()
+                                            .tooltip(tip(all_names))
+                                            .child(
+                                                div()
+                                                    .max_w(px(80.))
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .px_1()
+                                                    .rounded(px(3.))
+                                                    .border_1()
+                                                    .border_color(color)
+                                                    .text_size(px(10.))
+                                                    .text_color(color)
+                                                    .child(r.name.clone()),
+                                            )
+                                            .when(more > 0, |d| {
+                                                d.child(
+                                                    div()
+                                                        .text_size(px(10.))
+                                                        .text_color(p.muted)
+                                                        .child(format!("+{more}")),
+                                                )
+                                            })
+                                    })
+                                })
                                 .child(
                                     div()
                                         .id(("copy-hash", ix))
@@ -609,6 +635,7 @@ impl KernApp {
                                         .justify_center()
                                         .rounded(px(3.))
                                         .hover(move |s| s.bg(p.active))
+                                        .tooltip(tip("Copy commit hash"))
                                         .child(icon_el("copy", 11., p.muted))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();

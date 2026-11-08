@@ -104,15 +104,18 @@ jobs:
           }
           switch ($cmd) {
             'wheel' {
-              # wheel fx fy notches [ctrl|alt]; positive notches turn the wheel away from you
+              # wheel fx fy u2|d3 [ctrl|alt]: notches up (away from you) or down. Not "-3":
+              # PowerShell would take that for a parameter name.
               $r = Rect 'area'; At ($r[0] + $r[2] * [double]$a1) ($r[1] + $r[3] * [double]$a2)
+              $sign = if ($a3.StartsWith('d')) { -1 } else { 1 }; $count = [int]$a3.Substring(1)
               Mods $a4 $true
-              for ($i = 0; $i -lt [math]::Abs([int]$a3); $i++) { [Inp]::mouse_event(0x0800, 0, 0, 120 * [math]::Sign([int]$a3), [UIntPtr]::Zero); Start-Sleep -Milliseconds 40 }
+              for ($i = 0; $i -lt $count; $i++) { [Inp]::mouse_event(0x0800, 0, 0, 120 * $sign, [UIntPtr]::Zero); Start-Sleep -Milliseconds 40 }
               Start-Sleep -Milliseconds 60; Mods $a4 $false
             }
             'hwheel' {
               $r = Rect 'area'; At ($r[0] + $r[2] * [double]$a1) ($r[1] + $r[3] * [double]$a2)
-              [Inp]::mouse_event(0x1000, 0, 0, 120 * [int]$a3, [UIntPtr]::Zero)
+              $sign = if ($a3.StartsWith('l')) { -1 } else { 1 }
+              [Inp]::mouse_event(0x1000, 0, 0, 120 * $sign * [int]$a3.Substring(1), [UIntPtr]::Zero)
             }
             'dragimg' {
               $r = Rect 'area'
@@ -154,22 +157,24 @@ jobs:
           sleep 1500
           check mediastate fit=true
           shot w-img-fit
-          shell $in wheel 0.5 0.5 -3
+          shell $in wheel 0.5 0.5 d3
           sleep 300
+          check mediastate scrolls=1
           check mediastate pan=0,0
-          shell $in wheel 0.3 0.3 2 ctrl
+          shell $in wheel 0.3 0.3 u2 ctrl
           sleep 300
           check mediastate fit=false
           shot w-img-ctrlwheel
-          shell $in wheel 0.5 0.5 -2
+          check mediastate pan=118,89
+          shell $in wheel 0.5 0.5 d2
           sleep 300
-          check mediastate area=
-          shell $in wheel 0.5 0.5 -2 alt
+          check mediastate pan=118,-151
+          shell $in wheel 0.5 0.5 d2 alt
           sleep 300
-          check mediastate area=
-          shell $in hwheel 0.5 0.5 2
+          check mediastate pan=-122,-151
+          shell $in hwheel 0.5 0.5 r2
           sleep 300
-          check mediastate area=
+          check mediastate pan=-301,-151
           shell $in dragimg 0.6 0.6 0.3 0.3
           sleep 300
           check mediastate area=
@@ -183,8 +188,9 @@ jobs:
           waitfor 10 mediastate 320.0
           sleep 1000
           check mediastate area=
-          shell $in wheel 0.5 0.5 2 ctrl
+          shell $in wheel 0.5 0.5 u2 ctrl
           sleep 300
+          check mediastate fit=false
           check mediastate pan=0,0
           shell $in dragimg 0.5 0.5 0.2 0.2
           sleep 300

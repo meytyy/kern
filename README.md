@@ -2,7 +2,7 @@
 
 KERN is a native code editor for macOS and Windows, built with Rust and GPUI.
 
-**[Download for macOS](https://github.com/meytyy/kern/releases/download/v0.1.4/KERN-macos-arm64.zip)** (Apple Silicon) · **[Download for Windows](https://github.com/meytyy/kern/releases/download/v0.1.4/KERN-windows-x64-setup.exe)** (x64)
+**[Download for macOS](https://github.com/meytyy/kern/releases/download/v0.1.5/KERN-macos-arm64.zip)** (Apple Silicon) · **[Download for Windows](https://github.com/meytyy/kern/releases/download/v0.1.5/KERN-windows-x64-setup.exe)** (x64)
 
 ![KERN with a Rust project: file tree, highlighted code and a terminal](docs/screenshots/editor.png)
 
@@ -21,7 +21,7 @@ KERN is a native code editor for macOS and Windows, built with Rust and GPUI.
 
 - **Edit code** with Tree-sitter highlighting for Rust, TypeScript and JavaScript, Python, Swift, C and C++, C#, HTML, CSS, JSON, YAML, TOML, Markdown, shell scripts and more. With a language server installed you get completions, hover, parameter hints, errors, Go to Definition and Format Document.
 - **Find things**: open a file by name (⌘P / Ctrl+P), search the whole project (⇧⌘F / Ctrl+Shift+F) and run any command from the palette (⇧⌘P / Ctrl+Shift+P).
-- **Work with files**: create, rename, move and trash them in the Explorer; preview images, video (macOS), archives and binary files.
+- **Work with files**: create, rename, move and trash them in the Explorer; view images (zoom with Ctrl+wheel or a pinch, drag to move), play video with full screen, and look inside archives and binary files.
 - **Use Git**: stage and unstage, commit, see diffs, switch and create branches, pull, fetch and push, and browse the commit graph. Clone your GitHub repositories through the GitHub CLI (`gh`).
 - **Run things**: an integrated terminal with tabs, and a Run button for Cargo, `package.json` scripts, Python, Swift and CMake projects.
 - **Talk to Codex** in the side panel. It uses the official Codex app and your existing ChatGPT sign-in, and can take files and images as attachments.

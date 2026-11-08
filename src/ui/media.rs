@@ -1229,7 +1229,8 @@ impl MediaView {
                 player_button(
                     "vid-play",
                     if playing { "pause" } else { "play" },
-                    format!("{} (Space)", if playing { "Pause" } else { "Play" }),
+                    // One text for both states: a tooltip keeps its text while shown.
+                    "Play / Pause (Space)".to_string(),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Content::Video(v) = &this.content {
